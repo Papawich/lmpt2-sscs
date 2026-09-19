@@ -20,3 +20,4 @@ npm run dev
 ```
 
 Without Supabase environment variables the project falls back to the original local demo mode for UI preview only.
+"# lmpt2-sscs" 
