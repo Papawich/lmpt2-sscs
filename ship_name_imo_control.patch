@@ -1,0 +1,608 @@
+diff --git a/src/app/App.tsx b/src/app/App.tsx
+index f2e2449..dd1c775 100644
+--- a/src/app/App.tsx
++++ b/src/app/App.tsx
+@@ -39,6 +39,7 @@ import {
+   updateProfileStatus,
+   fetchVessels,
+   createVessel as createCloudVessel,
++  renameVesselEverywhere,
+   updateSisterShipVerification,
+   fetchStudies,
+   saveStudy as saveCloudStudy,
+@@ -357,7 +358,9 @@ function blankStudy(vessel: Vessel, user: UserAccount, prev?: SSCSStudy, initial
+         return {
+           id: tmpl.id, section: sec.section, name: tmpl.name, desc: tmpl.desc,
+           requiresDoc: tmpl.requiresDoc, requiresExpiry: tmpl.requiresExpiry,
+-          value:        old && !expired ? old.value        : "",
++          value:        tmpl.id === "gi-01" ? vessel.name
++                      : tmpl.id === "gi-02" ? vessel.imo
++                      : old && !expired ? old.value : "",
+           documentName: old && !expired ? old.documentName : "",
+           expiryDate:   old && !expired ? old.expiryDate   : "",
+           terminalNote: "", isCorrected: false,
+@@ -458,8 +461,10 @@ function vesselWithSubmittedGeneralInfo(vessel: Vessel, study?: SSCSStudy): Vess
+ 
+   return {
+     ...vessel,
+-    name: gi("gi-01") || vessel.name,
+-    imo: gi("gi-02") || vessel.imo,
++    // Vessel identity is canonical in public.vessels. Ship name changes only via
++    // the explicit Change action; IMO is immutable after the vessel is created.
++    name: vessel.name,
++    imo: vessel.imo,
+     callSign: gi("gi-03") || vessel.callSign,
+     flag: gi("gi-04") || vessel.flag,
+     portOfRegistry: gi("gi-05") || vessel.portOfRegistry,
+@@ -475,9 +480,23 @@ function vesselWithSubmittedGeneralInfo(vessel: Vessel, study?: SSCSStudy): Vess
+ }
+ 
+ 
++function withCanonicalVesselIdentity(study: SSCSStudy, vessel?: Vessel): SSCSStudy {
++  if (!vessel) return study;
++  return {
++    ...study,
++    vesselName: vessel.name,
++    items: study.items.map(item =>
++      item.id === "gi-01" ? { ...item, value: vessel.name }
++      : item.id === "gi-02" ? { ...item, value: vessel.imo }
++      : item
++    ),
++  };
++}
++
++
+ function buildApprovalEmailDraft(vessel: Vessel, study: SSCSStudy) {
+   const gi = (id: string) => study.items.find(i => i.id === id)?.value?.trim() ?? "";
+-  const vesselName = gi("gi-01") || vessel.name || study.vesselName;
++  const vesselName = vessel.name || study.vesselName;
+   const ballastDraftVal = gi("gi-20");
+   const loadedDraftVal = gi("gi-21");
+   const upperDeckVal = gi("gi-18");
+@@ -854,6 +873,9 @@ export default function App() {
+   const [activeStudy, setActiveStudy] = useState<SSCSStudy | null>(null);
+   const [studyTab, setStudyTab]       = useState<string>(CHECKLIST_TEMPLATE[0].section);
+   const [generalInfoSubTab, setGeneralInfoSubTab] = useState<string>("Ship Info");
++  const [shipNameEditing, setShipNameEditing] = useState(false);
++  const [shipNameDraft, setShipNameDraft] = useState("");
++  const [shipNameSaving, setShipNameSaving] = useState(false);
+   const [toast, setToast]             = useState<{ msg: string; type: "success" | "error" | "info" } | null>(null);
+   const [kickoffVessel, setKickoffVessel] = useState<Vessel | null>(null);
+ 
+@@ -957,9 +979,11 @@ export default function App() {
+       fetchVessels(),
+       fetchStudies(CLOUD_STUDY_DEFAULTS),
+     ]);
++    const loadedVessels = cloudVessels as Vessel[];
++    const vesselMap = new Map(loadedVessels.map(vessel => [vessel.id, vessel]));
+     setUsers(cloudUsers as UserAccount[]);
+-    setVessels(cloudVessels as Vessel[]);
+-    setStudies(cloudStudies as SSCSStudy[]);
++    setVessels(loadedVessels);
++    setStudies((cloudStudies as SSCSStudy[]).map(study => withCanonicalVesselIdentity(study, vesselMap.get(study.vesselId))));
+   }
+ 
+   // Restore Supabase session and hydrate cloud data. In local-preview mode the original
+@@ -1466,7 +1490,60 @@ export default function App() {
+     throw new Error("Document source is unavailable.");
+   }
+ 
+-  function openStudy(study: SSCSStudy) { setActiveStudy(study); setPage("study"); }
++  function openStudy(study: SSCSStudy) {
++    const vessel = vessels.find(candidate => candidate.id === study.vesselId);
++    setActiveStudy(withCanonicalVesselIdentity(study, vessel));
++    setShipNameEditing(false);
++    setShipNameDraft("");
++    setPage("study");
++  }
++
++  async function handleRenameVessel() {
++    if (!activeStudy || !currentUser) return;
++    const vessel = vessels.find(v => v.id === activeStudy.vesselId);
++    if (!vessel) return;
++
++    const newName = shipNameDraft.trim();
++    if (!newName) {
++      showToast("Ship name is required.", "error");
++      return;
++    }
++    if (newName === vessel.name) {
++      setShipNameEditing(false);
++      setShipNameDraft("");
++      return;
++    }
++
++    setShipNameSaving(true);
++    try {
++      let updatedVessel: Vessel = { ...vessel, name: newName };
++      if (supabaseConfigured) {
++        updatedVessel = await renameVesselEverywhere(vessel.id, newName) as Vessel;
++      }
++
++      const renameStudy = (study: SSCSStudy): SSCSStudy => {
++        if (study.vesselId !== vessel.id) return study;
++        return {
++          ...study,
++          vesselName: newName,
++          items: study.items.map(item => item.id === "gi-01" ? { ...item, value: newName } : item),
++        };
++      };
++
++      setVessels(prev => prev.map(v => v.id === vessel.id ? updatedVessel : v));
++      setStudies(prev => prev.map(renameStudy));
++      setActiveStudy(prev => prev ? renameStudy(prev) : prev);
++      setSelectedVessel(prev => prev?.id === vessel.id ? updatedVessel : prev);
++      setShipNameEditing(false);
++      setShipNameDraft("");
++      showToast(`Ship name changed to ${newName}. All vessel-name fields were updated.`, "success");
++    } catch (err) {
++      console.error("[Vessel rename failed]", err);
++      showToast(err instanceof Error ? err.message : "Unable to change ship name.", "error");
++    } finally {
++      setShipNameSaving(false);
++    }
++  }
+ 
+   function initiateStudy(vessel: Vessel, fromExisting?: SSCSStudy) {
+     if (!currentUser) return;
+@@ -1732,10 +1809,15 @@ export default function App() {
+     const pct = completionPct(activeStudy);
+     if (pct < 100) { showToast("Please complete all checklist items before submitting.", "error"); return; }
+ 
+-    const latestName = activeStudy.items.find(item => item.id === "gi-01")?.value?.trim() || activeStudy.vesselName;
++    const canonicalName = studyVessel?.name || activeStudy.vesselName;
+     const submittedStudy: SSCSStudy = {
+       ...activeStudy,
+-      vesselName: latestName,
++      vesselName: canonicalName,
++      items: activeStudy.items.map(item =>
++        item.id === "gi-01" ? { ...item, value: canonicalName }
++        : item.id === "gi-02" && studyVessel ? { ...item, value: studyVessel.imo }
++        : item
++      ),
+       status: "submitted",
+       submittedAt: new Date().toISOString(),
+     };
+@@ -2669,8 +2751,8 @@ export default function App() {
+     // Fall back to the vessel master record only when a General Information field is blank.
+     const studyValue = (itemId: string) =>
+       study?.items.find(item => item.id === itemId)?.value?.trim() ?? "";
+-    const detailName           = studyValue("gi-01") || v.name;
+-    const detailImo            = studyValue("gi-02") || v.imo;
++    const detailName           = v.name;
++    const detailImo            = v.imo;
+     const detailCallSign       = studyValue("gi-03") || v.callSign || "—";
+     const detailFlag           = studyValue("gi-04") || v.flag || "—";
+     const detailPort           = studyValue("gi-05") || v.portOfRegistry || "—";
+@@ -3057,6 +3139,7 @@ export default function App() {
+     const pct = completionPct(activeStudy);
+ 
+     const vessel = vessels.find(v => v.id === activeStudy.vesselId);
++    const canRenameShip = Boolean(vessel && (isTerminal || currentUser.isAdmin || vessel.createdById === uid));
+     const verifiedSisterShip = Boolean(vessel?.isSisterShip && vessel.sisterShipStatus === "verified");
+     const referenceVessel = vessel?.referenceVesselId ? vessels.find(candidate => candidate.id === vessel.referenceVesselId) : undefined;
+     const inheritedSectionReadOnly = (section: string) => verifiedSisterShip && [
+@@ -3457,16 +3540,73 @@ export default function App() {
+                 {tmplItems.map(tmpl => {
+                   const item = activeStudy.items.find(i => i.id === tmpl.id);
+                   if (!item) return null;
+-                  const filled = item.value.trim() !== "";
++                  const canonicalIdentityValue = tmpl.id === "gi-01"
++                    ? (vessel?.name ?? item.value)
++                    : tmpl.id === "gi-02"
++                      ? (vessel?.imo ?? item.value)
++                      : item.value;
++                  const filled = canonicalIdentityValue.trim() !== "";
++                  const isShipName = tmpl.id === "gi-01";
++                  const isImo = tmpl.id === "gi-02";
+                   return (
+                     <div key={item.id} className={`px-5 py-2.5 transition-colors ${filled ? "bg-emerald-500/[0.03]" : ""}`}>
+                       <div className="grid items-center gap-x-4" style={{ gridTemplateColumns: "minmax(180px,38%) 1fr auto" }}>
+                         <span className="flex items-center gap-2 text-xs text-foreground">
+                           <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${filled ? "bg-emerald-400" : "bg-border"}`} />
+                           {item.name}
++                          {isImo && <Lock className="w-3 h-3 text-muted-foreground" />}
+                           {item.isCorrected && <span className="font-mono text-[9px] text-sky-400 border border-sky-500/30 rounded px-1">Corrected</span>}
+                         </span>
+-                        {canEdit && !forceReadOnly ? (
++                        {isShipName ? (
++                          canEdit && canRenameShip && !forceReadOnly ? (
++                            shipNameEditing ? (
++                              <div className="flex items-center gap-2">
++                                <input
++                                  type="text"
++                                  value={shipNameDraft}
++                                  onChange={e => setShipNameDraft(e.target.value)}
++                                  placeholder="New ship name"
++                                  className={inputCls}
++                                  autoFocus
++                                />
++                                <button
++                                  type="button"
++                                  onClick={handleRenameVessel}
++                                  disabled={shipNameSaving}
++                                  className="shrink-0 rounded bg-primary px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-wider text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
++                                >
++                                  {shipNameSaving ? "Saving…" : "Save"}
++                                </button>
++                                <button
++                                  type="button"
++                                  onClick={() => { setShipNameEditing(false); setShipNameDraft(""); }}
++                                  disabled={shipNameSaving}
++                                  className="shrink-0 rounded border border-border px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:bg-secondary disabled:opacity-50"
++                                >
++                                  Cancel
++                                </button>
++                              </div>
++                            ) : (
++                              <div className="flex items-center gap-2">
++                                <span className="flex-1 rounded border border-border bg-secondary/50 px-2.5 py-1.5 text-sm text-foreground">{canonicalIdentityValue || "—"}</span>
++                                <button
++                                  type="button"
++                                  onClick={() => { setShipNameDraft(canonicalIdentityValue); setShipNameEditing(true); }}
++                                  className="shrink-0 rounded border border-primary/30 bg-primary/5 px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-wider text-primary hover:bg-primary/10"
++                                >
++                                  Change
++                                </button>
++                              </div>
++                            )
++                          ) : (
++                            <span className="text-sm text-foreground">{canonicalIdentityValue || <span className="text-muted-foreground/50">—</span>}</span>
++                          )
++                        ) : isImo ? (
++                          <div className="flex items-center gap-2">
++                            <span className="flex-1 rounded border border-border bg-secondary/50 px-2.5 py-1.5 text-sm text-foreground">{canonicalIdentityValue || "—"}</span>
++                            <span className="shrink-0 rounded border border-border px-2 py-1 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">Locked</span>
++                          </div>
++                        ) : canEdit && !forceReadOnly ? (
+                           tmpl.inputType === "select" ? (
+                             <select value={item.value} onChange={e => updateItem(item.id, "value", e.target.value)} className={selectCls}>
+                               <option value="">— Select —</option>
+@@ -3476,7 +3616,7 @@ export default function App() {
+                             <input type="text" value={item.value} onChange={e => updateItem(item.id, "value", e.target.value)} placeholder="—" className={inputCls} />
+                           )
+                         ) : (
+-                          <span className="text-sm text-foreground">{item.value || <span className="text-muted-foreground/50">—</span>}</span>
++                          <span className="text-sm text-foreground">{canonicalIdentityValue || <span className="text-muted-foreground/50">—</span>}</span>
+                         )}
+                         <span className={`font-mono text-xs text-muted-foreground whitespace-nowrap ${tmpl.unit ? "" : "invisible"}`}>{tmpl.unit ?? "·"}</span>
+                       </div>
+diff --git a/src/app/backendService.ts b/src/app/backendService.ts
+index 99e1be0..beb8875 100644
+--- a/src/app/backendService.ts
++++ b/src/app/backendService.ts
+@@ -352,6 +352,26 @@ export async function createVessel(vessel: AnyVessel): Promise<AnyVessel> {
+   return vesselFromRow(data);
+ }
+ 
++export async function renameVesselEverywhere(vesselId: number, newName: string): Promise<AnyVessel> {
++  const client = requireSupabase();
++  const normalizedName = newName.trim();
++  if (!normalizedName) throw new Error("Vessel name is required.");
++
++  const { error: renameError } = await client.rpc("rename_vessel_everywhere", {
++    p_vessel_id: vesselId,
++    p_new_name: normalizedName,
++  });
++  if (renameError) throw renameError;
++
++  const { data, error } = await client
++    .from("vessels")
++    .select("*")
++    .eq("id", vesselId)
++    .single();
++  if (error) throw error;
++  return vesselFromRow(data);
++}
++
+ export async function updateSisterShipVerification(opts: {
+   vesselId: number;
+   status: "pending" | "verified" | "rejected";
+diff --git a/supabase/007_vessel_identity_controls.sql b/supabase/007_vessel_identity_controls.sql
+new file mode 100644
+index 0000000..20c42a2
+--- /dev/null
++++ b/supabase/007_vessel_identity_controls.sql
+@@ -0,0 +1,302 @@
++-- Vessel identity controls for LMPT2 SSCS
++-- 1) IMO is immutable after vessel creation.
++-- 2) Ship name can only be changed through rename_vessel_everywhere().
++-- 3) Ship name and IMO inside every SSCS study are kept equal to the vessel master.
++-- 4) General Information submit sync never changes vessel name or IMO.
++
++-- ---------------------------------------------------------------------------
++-- Protect vessel identity at database level.
++-- ---------------------------------------------------------------------------
++create or replace function public.enforce_vessel_identity_update()
++returns trigger
++language plpgsql
++security definer
++set search_path = public, pg_temp
++as $$
++begin
++  if new.imo is distinct from old.imo then
++    raise exception 'IMO number cannot be changed after the vessel is created.';
++  end if;
++
++  if new.name is distinct from old.name
++     and coalesce(current_setting('app.vessel_rename_in_progress', true), 'off') <> 'on' then
++    raise exception 'Use the Change Ship Name action to rename a vessel.';
++  end if;
++
++  return new;
++end;
++$$;
++
++revoke all on function public.enforce_vessel_identity_update() from public;
++
++drop trigger if exists a0_enforce_vessel_identity_update on public.vessels;
++create trigger a0_enforce_vessel_identity_update
++before update on public.vessels
++for each row execute function public.enforce_vessel_identity_update();
++
++-- ---------------------------------------------------------------------------
++-- Keep identity fields inside a study equal to public.vessels.
++-- This also protects against a modified browser/API request changing IMO.
++-- ---------------------------------------------------------------------------
++create or replace function public.enforce_study_vessel_identity()
++returns trigger
++language plpgsql
++security definer
++set search_path = public, pg_temp
++as $$
++declare
++  canonical_name text;
++  canonical_imo text;
++begin
++  select name, imo
++    into canonical_name, canonical_imo
++  from public.vessels
++  where id = new.vessel_id;
++
++  if canonical_name is null then
++    return new;
++  end if;
++
++  new.vessel_name := canonical_name;
++  new.items := coalesce((
++    select jsonb_agg(
++      case
++        when elem->>'id' = 'gi-01' then jsonb_set(elem, '{value}', to_jsonb(canonical_name), true)
++        when elem->>'id' = 'gi-02' then jsonb_set(elem, '{value}', to_jsonb(canonical_imo), true)
++        else elem
++      end
++      order by ord
++    )
++    from jsonb_array_elements(coalesce(new.items, '[]'::jsonb)) with ordinality as x(elem, ord)
++  ), '[]'::jsonb);
++
++  return new;
++end;
++$$;
++
++revoke all on function public.enforce_study_vessel_identity() from public;
++
++drop trigger if exists a0_enforce_study_vessel_identity on public.sscs_studies;
++create trigger a0_enforce_study_vessel_identity
++before insert or update on public.sscs_studies
++for each row execute function public.enforce_study_vessel_identity();
++
++-- Ship officers normally cannot alter vessel_name. The only exception is the
++-- controlled rename transaction below, which validates permission separately.
++create or replace function public.enforce_ship_study_update()
++returns trigger
++language plpgsql
++security definer
++set search_path = public, pg_temp
++as $$
++begin
++  if public.current_user_role() = 'ship_officer'
++     and not public.current_user_is_admin()
++     and coalesce(current_setting('app.vessel_rename_in_progress', true), 'off') <> 'on' then
++    if new.initiated_by_id is distinct from old.initiated_by_id
++       or new.initiated_by_name is distinct from old.initiated_by_name
++       or new.initiated_by_role is distinct from old.initiated_by_role
++       or new.vessel_id is distinct from old.vessel_id
++       or new.vessel_name is distinct from old.vessel_name
++       or new.terminal_notes is distinct from old.terminal_notes
++       or new.reviewed_by_id is distinct from old.reviewed_by_id
++       or new.reviewed_by_name is distinct from old.reviewed_by_name
++       or new.approved_at is distinct from old.approved_at then
++      raise exception 'Ship officers cannot modify protected study fields';
++    end if;
++
++    if not (
++      (old.status = 'draft' and new.status in ('draft','submitted'))
++      or (old.status = 'editing' and new.status in ('editing','submitted'))
++      or (old.status = 'approved' and new.status = 'edit_requested')
++    ) then
++      raise exception 'Invalid ship-officer study status transition: % -> %', old.status, new.status;
++    end if;
++  end if;
++  return new;
++end;
++$$;
++
++-- ---------------------------------------------------------------------------
++-- Controlled global rename. Updates the vessel master plus every study and
++-- General Information Ship's Name field for this vessel in one transaction.
++-- ---------------------------------------------------------------------------
++create or replace function public.rename_vessel_everywhere(
++  p_vessel_id bigint,
++  p_new_name text
++)
++returns void
++language plpgsql
++security definer
++set search_path = public, pg_temp
++as $$
++declare
++  target public.vessels%rowtype;
++  clean_name text := btrim(coalesce(p_new_name, ''));
++  role_name text;
++begin
++  if auth.uid() is null then
++    raise exception 'Authentication is required.';
++  end if;
++
++  if clean_name = '' then
++    raise exception 'Ship name is required.';
++  end if;
++
++  if char_length(clean_name) > 160 then
++    raise exception 'Ship name is too long.';
++  end if;
++
++  select * into target
++  from public.vessels
++  where id = p_vessel_id
++  for update;
++
++  if not found then
++    raise exception 'Vessel not found.';
++  end if;
++
++  role_name := public.current_user_role();
++  if not (public.current_user_is_approved() or public.current_user_is_admin())
++     or not (
++       public.current_user_is_admin()
++       or role_name = 'terminal_officer'
++       or target.created_by = auth.uid()
++     ) then
++    raise exception 'You are not authorised to change this ship name.';
++  end if;
++
++  if clean_name = target.name then
++    return;
++  end if;
++
++  perform set_config('app.vessel_rename_in_progress', 'on', true);
++
++  update public.vessels
++  set name = clean_name,
++      updated_at = now()
++  where id = p_vessel_id;
++
++  update public.sscs_studies s
++  set vessel_name = clean_name,
++      items = coalesce((
++        select jsonb_agg(
++          case
++            when elem->>'id' = 'gi-01' then jsonb_set(elem, '{value}', to_jsonb(clean_name), true)
++            else elem
++          end
++          order by ord
++        )
++        from jsonb_array_elements(coalesce(s.items, '[]'::jsonb)) with ordinality as x(elem, ord)
++      ), '[]'::jsonb),
++      updated_at = now()
++  where s.vessel_id = p_vessel_id;
++
++  insert into public.audit_logs(user_id, action, entity_type, entity_id, details)
++  values (
++    auth.uid(),
++    'vessel_name_changed',
++    'vessel',
++    p_vessel_id::text,
++    jsonb_build_object('old_name', target.name, 'new_name', clean_name, 'imo', target.imo)
++  );
++end;
++$$;
++
++revoke all on function public.rename_vessel_everywhere(bigint, text) from public;
++grant execute on function public.rename_vessel_everywhere(bigint, text) to authenticated;
++
++-- ---------------------------------------------------------------------------
++-- General Information submit sync: identity fields are NOT writable here.
++-- IMO is immutable and Ship Name has its own explicit rename flow.
++-- ---------------------------------------------------------------------------
++create or replace function public.sync_vessel_master_from_study(target_study_id text)
++returns void
++language plpgsql
++security definer
++set search_path = public, pg_temp
++as $$
++declare
++  s public.sscs_studies%rowtype;
++  gi03 text; gi04 text; gi05 text; gi06 text; gi07 text;
++  gi08 text; gi09 text; gi10 text; gi11 text; gi12 text; gi13 text;
++begin
++  select * into s
++  from public.sscs_studies
++  where id = target_study_id;
++
++  if not found or s.submitted_at is null then
++    return;
++  end if;
++
++  select
++    max(value) filter (where item_id = 'gi-03'),
++    max(value) filter (where item_id = 'gi-04'),
++    max(value) filter (where item_id = 'gi-05'),
++    max(value) filter (where item_id = 'gi-06'),
++    max(value) filter (where item_id = 'gi-07'),
++    max(value) filter (where item_id = 'gi-08'),
++    max(value) filter (where item_id = 'gi-09'),
++    max(value) filter (where item_id = 'gi-10'),
++    max(value) filter (where item_id = 'gi-11'),
++    max(value) filter (where item_id = 'gi-12'),
++    max(value) filter (where item_id = 'gi-13')
++  into gi03, gi04, gi05, gi06, gi07, gi08, gi09, gi10, gi11, gi12, gi13
++  from (
++    select
++      elem->>'id' as item_id,
++      nullif(btrim(coalesce(elem->>'value', '')), '') as value
++    from jsonb_array_elements(coalesce(s.items, '[]'::jsonb)) elem
++  ) x;
++
++  update public.vessels v
++  set
++    call_sign = coalesce(gi03, v.call_sign),
++    flag = coalesce(gi04, v.flag),
++    port_of_registry = coalesce(gi05, v.port_of_registry),
++    year_built = case
++      when gi06 ~ '^[0-9]{4}$' then gi06::integer
++      else v.year_built
++    end,
++    owner = coalesce(gi07, v.owner),
++    operator = coalesce(gi08, v.operator),
++    vessel_type = coalesce(gi09, v.vessel_type),
++    capacity = case
++      when gi10 is null then v.capacity
++      when gi10 ~* '(m³|m3)' then gi10
++      else gi10 || ' m³'
++    end,
++    classification = coalesce(gi11, v.classification),
++    gas_mgmt_1 = coalesce(gi12, v.gas_mgmt_1),
++    gas_mgmt_2 = coalesce(gi13, v.gas_mgmt_2),
++    updated_at = now()
++  where v.id = s.vessel_id;
++end;
++$$;
++
++revoke all on function public.sync_vessel_master_from_study(text) from public;
++
++-- One-time cleanup: make every existing study use the current vessel-master
++-- Ship Name and immutable IMO so old mismatches disappear immediately.
++do $$
++begin
++  perform set_config('app.vessel_rename_in_progress', 'on', true);
++
++  update public.sscs_studies s
++  set vessel_name = v.name,
++      items = coalesce((
++        select jsonb_agg(
++          case
++            when elem->>'id' = 'gi-01' then jsonb_set(elem, '{value}', to_jsonb(v.name), true)
++            when elem->>'id' = 'gi-02' then jsonb_set(elem, '{value}', to_jsonb(v.imo), true)
++            else elem
++          end
++          order by ord
++        )
++        from jsonb_array_elements(coalesce(s.items, '[]'::jsonb)) with ordinality as x(elem, ord)
++      ), '[]'::jsonb),
++      updated_at = now()
++  from public.vessels v
++  where v.id = s.vessel_id;
++end;
++$$;

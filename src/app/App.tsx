@@ -39,6 +39,8 @@ import {
   updateProfileStatus,
   fetchVessels,
   createVessel as createCloudVessel,
+  renameVesselEverywhere,
+  updateSisterShipVerification,
   fetchStudies,
   saveStudy as saveCloudStudy,
   uploadStudyDocument,
@@ -95,7 +97,7 @@ import {
   RequiredDocumentsSection,
   defaultRequiredDocumentsData, isRequiredDocumentsComplete,
 } from "./components/RequiredDocumentsSection";
-import type { RequiredDocumentsData, UploadedFile } from "./components/RequiredDocumentsSection";
+import type { DocKey, RequiredDocumentsData, UploadedFile } from "./components/RequiredDocumentsSection";
 import {
   AttachmentsSection,
   VesselPhotoSummary,
@@ -115,6 +117,8 @@ import type { QualityAssessmentData } from "./components/QualityAssessmentSectio
 // ─────────────────────────────────────────────────────────────────────────────
 // VESSELS
 // ─────────────────────────────────────────────────────────────────────────────
+type SisterShipStatus = "none" | "pending" | "verified" | "rejected";
+
 interface Vessel {
   id: number; name: string; imo: string; callSign: string;
   flag: string; portOfRegistry: string; year: number;
@@ -122,6 +126,12 @@ interface Vessel {
   owner: string; operator: string; classification: string;
   gasMgmt1: string; gasMgmt2: string;
   status: string; createdById?: string;
+  isSisterShip?: boolean;
+  referenceVesselId?: number;
+  sisterShipStatus?: SisterShipStatus;
+  sisterShipVerifiedById?: string;
+  sisterShipVerifiedAt?: string;
+  sisterReferenceStudyId?: string;
 }
 
 const INITIAL_VESSELS: Vessel[] = [
@@ -348,7 +358,9 @@ function blankStudy(vessel: Vessel, user: UserAccount, prev?: SSCSStudy, initial
         return {
           id: tmpl.id, section: sec.section, name: tmpl.name, desc: tmpl.desc,
           requiresDoc: tmpl.requiresDoc, requiresExpiry: tmpl.requiresExpiry,
-          value:        old && !expired ? old.value        : "",
+          value:        tmpl.id === "gi-01" ? vessel.name
+                      : tmpl.id === "gi-02" ? vessel.imo
+                      : old && !expired ? old.value : "",
           documentName: old && !expired ? old.documentName : "",
           expiryDate:   old && !expired ? old.expiryDate   : "",
           terminalNote: "", isCorrected: false,
@@ -388,6 +400,51 @@ function getLatestStudy(studies: SSCSStudy[], vesselId: number) {
     .sort((a, b) => new Date(b.initiatedAt).getTime() - new Date(a.initiatedAt).getTime())[0];
 }
 
+const SISTER_MAJOR_DIMENSION_IDS = new Set([
+  "gi-14", "gi-15", "gi-16", "gi-17", "gi-18", "gi-19",
+  "gi-20", "gi-21", "gi-22", "gi-23", "gi-24", "gi-25",
+]);
+
+const SISTER_BORROWED_DOC_KEYS: DocKey[] = [
+  "d_2_1", "d_2_2", "d_2_3", "d_2_4", "d_2_5",
+  "d_3_1", "d_3_2", "d_3_3", "d_3_4",
+  "d_4_1", "d_4_2",
+];
+
+function getLatestApprovedStudy(studies: SSCSStudy[], vesselId: number) {
+  return studies
+    .filter(s => s.vesselId === vesselId && s.status === "approved")
+    .sort((a, b) => new Date(b.approvedAt ?? b.initiatedAt).getTime() - new Date(a.approvedAt ?? a.initiatedAt).getTime())[0];
+}
+
+function mergeSisterReferenceStudy(target: SSCSStudy, reference: SSCSStudy): SSCSStudy {
+  const refDocs = reference.requiredDocuments ?? defaultRequiredDocumentsData();
+  const ownDocs = target.requiredDocuments ?? defaultRequiredDocumentsData();
+  const requiredDocuments = { ...ownDocs };
+  for (const key of SISTER_BORROWED_DOC_KEYS) {
+    requiredDocuments[key] = [...(refDocs[key] ?? [])];
+  }
+
+  return {
+    ...target,
+    items: target.items.map(item => {
+      if (!SISTER_MAJOR_DIMENSION_IDS.has(item.id)) return item;
+      const ref = reference.items.find(source => source.id === item.id);
+      return ref ? { ...item, value: ref.value } : item;
+    }),
+    flatBodyData: structuredClone(reference.flatBodyData ?? defaultFlatBodyData()),
+    fenderReactionData: structuredClone(reference.fenderReactionData ?? defaultFenderReactionData()),
+    berthingEnergyData: structuredClone(reference.berthingEnergyData ?? defaultBerthingEnergyData()),
+    mooringArrangementData: structuredClone(reference.mooringArrangementData ?? defaultMooringArrangementData()),
+    gangwayData: structuredClone(reference.gangwayData ?? defaultGangwayData()),
+    unloadingArmData: structuredClone(reference.unloadingArmData ?? defaultUnloadingArmData()),
+    cargoManagementData: structuredClone(reference.cargoManagementData ?? defaultCargoManagementData()),
+    shipShoreLinkData: structuredClone(reference.shipShoreLinkData ?? defaultShipShoreLinkData()),
+    utilityData: structuredClone(reference.utilityData ?? defaultUtilityData()),
+    requiredDocuments,
+  };
+}
+
 function vesselWithSubmittedGeneralInfo(vessel: Vessel, study?: SSCSStudy): Vessel {
   // Main/Search must show the latest submitted information, not unfinished edits.
   // Draft/editing values stay inside the study until the user submits again.
@@ -404,8 +461,10 @@ function vesselWithSubmittedGeneralInfo(vessel: Vessel, study?: SSCSStudy): Vess
 
   return {
     ...vessel,
-    name: gi("gi-01") || vessel.name,
-    imo: gi("gi-02") || vessel.imo,
+    // Vessel identity is canonical in public.vessels. Ship name changes only via
+    // the explicit Change action; IMO is immutable after the vessel is created.
+    name: vessel.name,
+    imo: vessel.imo,
     callSign: gi("gi-03") || vessel.callSign,
     flag: gi("gi-04") || vessel.flag,
     portOfRegistry: gi("gi-05") || vessel.portOfRegistry,
@@ -421,9 +480,23 @@ function vesselWithSubmittedGeneralInfo(vessel: Vessel, study?: SSCSStudy): Vess
 }
 
 
+function withCanonicalVesselIdentity(study: SSCSStudy, vessel?: Vessel): SSCSStudy {
+  if (!vessel) return study;
+  return {
+    ...study,
+    vesselName: vessel.name,
+    items: study.items.map(item =>
+      item.id === "gi-01" ? { ...item, value: vessel.name }
+      : item.id === "gi-02" ? { ...item, value: vessel.imo }
+      : item
+    ),
+  };
+}
+
+
 function buildApprovalEmailDraft(vessel: Vessel, study: SSCSStudy) {
   const gi = (id: string) => study.items.find(i => i.id === id)?.value?.trim() ?? "";
-  const vesselName = gi("gi-01") || vessel.name || study.vesselName;
+  const vesselName = vessel.name || study.vesselName;
   const ballastDraftVal = gi("gi-20");
   const loadedDraftVal = gi("gi-21");
   const upperDeckVal = gi("gi-18");
@@ -755,6 +828,19 @@ function CertificateExpiringBadge({ count }: { count: number }) {
   );
 }
 
+function SisterShipBadge({ status }: { status: SisterShipStatus }) {
+  const cls = status === "verified"
+    ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+    : status === "rejected"
+      ? "bg-red-500/10 text-red-400 border-red-500/30"
+      : "bg-amber-500/10 text-amber-400 border-amber-500/30";
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono font-semibold tracking-wider uppercase border ${cls}`}>
+      <RefreshCw className="w-2.5 h-2.5" /> Sister {status}
+    </span>
+  );
+}
+
 function Toast({ msg, type }: { msg: string; type: "success" | "error" | "info" }) {
   return (
     <div className={`fixed bottom-20 right-6 z-[999] flex items-center gap-2.5 px-4 py-3 rounded border shadow-2xl font-mono text-sm animate-in slide-in-from-bottom-4 ${
@@ -787,6 +873,9 @@ export default function App() {
   const [activeStudy, setActiveStudy] = useState<SSCSStudy | null>(null);
   const [studyTab, setStudyTab]       = useState<string>(CHECKLIST_TEMPLATE[0].section);
   const [generalInfoSubTab, setGeneralInfoSubTab] = useState<string>("Ship Info");
+  const [shipNameEditing, setShipNameEditing] = useState(false);
+  const [shipNameDraft, setShipNameDraft] = useState("");
+  const [shipNameSaving, setShipNameSaving] = useState(false);
   const [toast, setToast]             = useState<{ msg: string; type: "success" | "error" | "info" } | null>(null);
   const [kickoffVessel, setKickoffVessel] = useState<Vessel | null>(null);
 
@@ -850,12 +939,29 @@ export default function App() {
   const [addVImo, setAddVImo]             = useState("");
   const [addVStatus, setAddVStatus]       = useState<"Active" | "In Refit">("Active");
   const [addVErr, setAddVErr]             = useState("");
+  const [addVIsSister, setAddVIsSister]   = useState(false);
+  const [addVReferenceSearch, setAddVReferenceSearch] = useState("");
+  const [addVReferenceVesselId, setAddVReferenceVesselId] = useState<number | null>(null);
+  const [addVSisterStatement, setAddVSisterStatement] = useState<File | null>(null);
 
   const pendingCount = users.filter(u => !u.isAdmin && u.status === "pending").length;
+  const addVReferenceCandidates = vessels
+    .filter(v => !!getLatestApprovedStudy(studies, v.id))
+    .filter(v => {
+      const q = addVReferenceSearch.trim().toLowerCase();
+      return !q || [v.name, v.imo, v.callSign].some(value => (value || "").toLowerCase().includes(q));
+    })
+    .slice(0, 8);
 
   function showToast(msg: string, type: "success" | "error" | "info" = "success") {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 3000);
+  }
+
+  function resetAddVesselForm() {
+    setAddVName(""); setAddVType("LNG Carrier"); setAddVCapacity(""); setAddVFlag("");
+    setAddVYear(String(new Date().getFullYear())); setAddVImo(""); setAddVStatus("Active"); setAddVErr("");
+    setAddVIsSister(false); setAddVReferenceSearch(""); setAddVReferenceVesselId(null); setAddVSisterStatement(null);
   }
 
 
@@ -873,9 +979,11 @@ export default function App() {
       fetchVessels(),
       fetchStudies(CLOUD_STUDY_DEFAULTS),
     ]);
+    const loadedVessels = cloudVessels as Vessel[];
+    const vesselMap = new Map(loadedVessels.map(vessel => [vessel.id, vessel]));
     setUsers(cloudUsers as UserAccount[]);
-    setVessels(cloudVessels as Vessel[]);
-    setStudies(cloudStudies as SSCSStudy[]);
+    setVessels(loadedVessels);
+    setStudies((cloudStudies as SSCSStudy[]).map(study => withCanonicalVesselIdentity(study, vesselMap.get(study.vesselId))));
   }
 
   // Restore Supabase session and hydrate cloud data. In local-preview mode the original
@@ -1382,7 +1490,60 @@ export default function App() {
     throw new Error("Document source is unavailable.");
   }
 
-  function openStudy(study: SSCSStudy) { setActiveStudy(study); setPage("study"); }
+  function openStudy(study: SSCSStudy) {
+    const vessel = vessels.find(candidate => candidate.id === study.vesselId);
+    setActiveStudy(withCanonicalVesselIdentity(study, vessel));
+    setShipNameEditing(false);
+    setShipNameDraft("");
+    setPage("study");
+  }
+
+  async function handleRenameVessel() {
+    if (!activeStudy || !currentUser) return;
+    const vessel = vessels.find(v => v.id === activeStudy.vesselId);
+    if (!vessel) return;
+
+    const newName = shipNameDraft.trim();
+    if (!newName) {
+      showToast("Ship name is required.", "error");
+      return;
+    }
+    if (newName === vessel.name) {
+      setShipNameEditing(false);
+      setShipNameDraft("");
+      return;
+    }
+
+    setShipNameSaving(true);
+    try {
+      let updatedVessel: Vessel = { ...vessel, name: newName };
+      if (supabaseConfigured) {
+        updatedVessel = await renameVesselEverywhere(vessel.id, newName) as Vessel;
+      }
+
+      const renameStudy = (study: SSCSStudy): SSCSStudy => {
+        if (study.vesselId !== vessel.id) return study;
+        return {
+          ...study,
+          vesselName: newName,
+          items: study.items.map(item => item.id === "gi-01" ? { ...item, value: newName } : item),
+        };
+      };
+
+      setVessels(prev => prev.map(v => v.id === vessel.id ? updatedVessel : v));
+      setStudies(prev => prev.map(renameStudy));
+      setActiveStudy(prev => prev ? renameStudy(prev) : prev);
+      setSelectedVessel(prev => prev?.id === vessel.id ? updatedVessel : prev);
+      setShipNameEditing(false);
+      setShipNameDraft("");
+      showToast(`Ship name changed to ${newName}. All vessel-name fields were updated.`, "success");
+    } catch (err) {
+      console.error("[Vessel rename failed]", err);
+      showToast(err instanceof Error ? err.message : "Unable to change ship name.", "error");
+    } finally {
+      setShipNameSaving(false);
+    }
+  }
 
   function initiateStudy(vessel: Vessel, fromExisting?: SSCSStudy) {
     if (!currentUser) return;
@@ -1424,6 +1585,17 @@ export default function App() {
     if (vessels.find(v => v.imo.toLowerCase() === addVImo.trim().toLowerCase()))
       return setAddVErr("A vessel with this IMO number already exists.");
     if (!currentUser) return;
+
+    const referenceVessel = addVIsSister
+      ? vessels.find(v => v.id === addVReferenceVesselId)
+      : undefined;
+    if (addVIsSister && !referenceVessel)
+      return setAddVErr("Please select the reference vessel for this sister ship.");
+    if (addVIsSister && referenceVessel && !getLatestApprovedStudy(studies, referenceVessel.id))
+      return setAddVErr("The reference vessel must have an approved SSCS study before it can be used as a sister ship reference.");
+    if (addVIsSister && !addVSisterStatement)
+      return setAddVErr("Please attach the Sister Ship Statement.");
+
     let newVessel: Vessel = {
       id: Date.now(), name: addVName.trim(), type: addVType,
       capacity: addVCapacity.trim() || "—", flag: addVFlag.trim() || "—",
@@ -1432,6 +1604,9 @@ export default function App() {
       callSign: "—", portOfRegistry: "—",
       owner: "—", operator: "—", classification: "—",
       gasMgmt1: "—", gasMgmt2: "N/A",
+      isSisterShip: addVIsSister,
+      referenceVesselId: addVIsSister ? referenceVessel?.id : undefined,
+      sisterShipStatus: addVIsSister ? "pending" : "none",
     };
     if (supabaseConfigured) {
       try {
@@ -1442,21 +1617,152 @@ export default function App() {
         return;
       }
     }
+
+    let newStudy: SSCSStudy | null = null;
+    let statementUploadFailed = false;
+    if (currentUser.role === "ship_officer" || addVIsSister) {
+      newStudy = blankStudy(newVessel, currentUser, undefined, "draft");
+      if (supabaseConfigured) {
+        try {
+          await saveCloudStudy(newStudy, currentUser.id);
+          if (addVIsSister && addVSisterStatement) {
+            const statement = await uploadStudyDocument({
+              studyId: newStudy.id,
+              docKey: "d_6_1",
+              file: addVSisterStatement,
+              userId: currentUser.id,
+            });
+            newStudy = {
+              ...newStudy,
+              requiredDocuments: {
+                ...(newStudy.requiredDocuments ?? defaultRequiredDocumentsData()),
+                d_6_1: [statement],
+              },
+            };
+            await saveCloudStudy(newStudy, currentUser.id);
+          }
+        } catch (err) {
+          console.error("[Sister ship statement upload failed]", err);
+          statementUploadFailed = true;
+        }
+      } else if (addVIsSister && addVSisterStatement) {
+        const statement = await new Promise<UploadedFile>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            name: addVSisterStatement.name,
+            size: addVSisterStatement.size,
+            type: addVSisterStatement.type,
+            uploadedAt: new Date().toISOString(),
+            dataUrl: reader.result as string,
+          });
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(addVSisterStatement);
+        });
+        newStudy = {
+          ...newStudy,
+          requiredDocuments: {
+            ...(newStudy.requiredDocuments ?? defaultRequiredDocumentsData()),
+            d_6_1: [statement],
+          },
+        };
+      }
+    }
+
     setVessels(prev => [...prev, newVessel]);
+    if (newStudy) setStudies(prev => [...prev, newStudy!]);
     setShowAddVessel(false);
-    setAddVName(""); setAddVType("LNG Carrier"); setAddVCapacity(""); setAddVFlag("");
-    setAddVYear(String(new Date().getFullYear())); setAddVImo(""); setAddVStatus("Active"); setAddVErr("");
+    resetAddVesselForm();
     setSelectedVessel(newVessel);
-    if (currentUser.role === "ship_officer") {
-      const newStudy = blankStudy(newVessel, currentUser, undefined, "draft");
-      setStudies(prev => [...prev, newStudy]);
+
+    if (currentUser.role === "ship_officer" && newStudy) {
       setActiveStudy(newStudy);
-      persistStudy(newStudy, true);
-      showToast(`${newVessel.name} added. You are authorised to fill the SSCS study.`, "success");
+      showToast(
+        statementUploadFailed
+          ? `${newVessel.name} added, but the Sister Ship Statement upload failed. Please upload it again in Required Documents.`
+          : addVIsSister
+            ? `${newVessel.name} added as a sister ship. Waiting for Terminal Officer verification.`
+            : `${newVessel.name} added. You are authorised to fill the SSCS study.`,
+        statementUploadFailed ? "error" : "success",
+      );
       setPage("study");
     } else {
-      showToast(`${newVessel.name} added to vessel database.`, "success");
+      showToast(
+        addVIsSister
+          ? `${newVessel.name} added as a sister ship. Terminal Officer verification is required.`
+          : `${newVessel.name} added to vessel database.`,
+        statementUploadFailed ? "error" : "success",
+      );
       setPage("vessel");
+    }
+  }
+
+  async function verifySisterShip(vessel: Vessel) {
+    if (!currentUser || currentUser.role !== "terminal_officer") return;
+    const referenceVessel = vessel.referenceVesselId
+      ? vessels.find(v => v.id === vessel.referenceVesselId)
+      : undefined;
+    const referenceStudy = referenceVessel
+      ? getLatestApprovedStudy(studies, referenceVessel.id)
+      : undefined;
+    const targetStudy = getLatestStudy(studies, vessel.id);
+
+    if (!referenceVessel || !referenceStudy) {
+      showToast("The reference vessel does not have an approved SSCS study.", "error");
+      return;
+    }
+    if (!targetStudy) {
+      showToast("No SSCS study exists for this sister ship.", "error");
+      return;
+    }
+    const statementFiles = targetStudy.requiredDocuments?.d_6_1 ?? [];
+    if (statementFiles.length === 0) {
+      showToast("Sister Ship Statement is required before verification.", "error");
+      return;
+    }
+
+    const mergedStudy = mergeSisterReferenceStudy(targetStudy, referenceStudy);
+    try {
+      let updatedVessel: Vessel = {
+        ...vessel,
+        sisterShipStatus: "verified",
+        sisterShipVerifiedById: currentUser.id,
+        sisterShipVerifiedAt: new Date().toISOString(),
+        sisterReferenceStudyId: referenceStudy.id,
+      };
+      if (supabaseConfigured) {
+        updatedVessel = await updateSisterShipVerification({
+          vesselId: vessel.id,
+          status: "verified",
+          referenceStudyId: referenceStudy.id,
+          verifiedById: currentUser.id,
+        }) as Vessel;
+        await saveCloudStudy(mergedStudy, currentUser.id);
+      }
+      setVessels(prev => prev.map(v => v.id === vessel.id ? updatedVessel : v));
+      setSelectedVessel(updatedVessel);
+      setStudies(prev => prev.map(study => study.id === mergedStudy.id ? mergedStudy : study));
+      if (activeStudy?.id === mergedStudy.id) setActiveStudy(mergedStudy);
+      showToast(`Sister ship verified. Reference data copied from ${referenceVessel.name}.`, "success");
+    } catch (err) {
+      console.error("[Sister ship verification failed]", err);
+      showToast(err instanceof Error ? err.message : "Unable to verify sister ship.", "error");
+    }
+  }
+
+  async function rejectSisterShip(vessel: Vessel) {
+    if (!currentUser || currentUser.role !== "terminal_officer") return;
+    try {
+      let updatedVessel: Vessel = { ...vessel, sisterShipStatus: "rejected", sisterReferenceStudyId: undefined };
+      if (supabaseConfigured) {
+        updatedVessel = await updateSisterShipVerification({ vesselId: vessel.id, status: "rejected" }) as Vessel;
+      }
+      setVessels(prev => prev.map(v => v.id === vessel.id ? updatedVessel : v));
+      setSelectedVessel(updatedVessel);
+      showToast("Sister ship reference rejected. Vessel-specific data must be completed normally.", "info");
+    } catch (err) {
+      console.error("[Sister ship rejection failed]", err);
+      showToast(err instanceof Error ? err.message : "Unable to reject sister ship reference.", "error");
     }
   }
 
@@ -1495,13 +1801,23 @@ export default function App() {
 
   function submitStudy() {
     if (!activeStudy || !currentUser) return;
+    const studyVessel = vessels.find(v => v.id === activeStudy.vesselId);
+    if (studyVessel?.isSisterShip && studyVessel.sisterShipStatus === "pending") {
+      showToast("Terminal Officer must verify the sister ship reference before submission.", "error");
+      return;
+    }
     const pct = completionPct(activeStudy);
     if (pct < 100) { showToast("Please complete all checklist items before submitting.", "error"); return; }
 
-    const latestName = activeStudy.items.find(item => item.id === "gi-01")?.value?.trim() || activeStudy.vesselName;
+    const canonicalName = studyVessel?.name || activeStudy.vesselName;
     const submittedStudy: SSCSStudy = {
       ...activeStudy,
-      vesselName: latestName,
+      vesselName: canonicalName,
+      items: activeStudy.items.map(item =>
+        item.id === "gi-01" ? { ...item, value: canonicalName }
+        : item.id === "gi-02" && studyVessel ? { ...item, value: studyVessel.imo }
+        : item
+      ),
       status: "submitted",
       submittedAt: new Date().toISOString(),
     };
@@ -2055,6 +2371,7 @@ export default function App() {
                           <div className="flex items-center gap-2 flex-wrap">
                             <p className="font-mono text-[10px] text-muted-foreground">{mainVessel.imo}</p>
                             {study && <StudyBadge status={study.status} />}
+                            {v.isSisterShip && <SisterShipBadge status={v.sisterShipStatus ?? "pending"} />}
                             {invalidCertificateCount > 0 && (
                               <CertificateInvalidBadge count={invalidCertificateCount} />
                             )}
@@ -2254,13 +2571,13 @@ export default function App() {
         {/* Add Vessel Modal */}
         {showAddVessel && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm">
-            <div className="w-full max-w-lg bg-card border border-border rounded shadow-2xl">
+            <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto bg-card border border-border rounded shadow-2xl">
               <div className="flex items-center justify-between px-6 py-4 border-b border-border">
                 <div className="flex items-center gap-2">
                   <Plus className="w-4 h-4 text-primary" />
                   <h2 className="font-mono text-sm font-bold text-foreground uppercase tracking-wide">Add New Vessel</h2>
                 </div>
-                <button onClick={() => { setShowAddVessel(false); setAddVErr(""); }} className="text-muted-foreground hover:text-foreground transition-colors"><X className="w-4 h-4" /></button>
+                <button onClick={() => { setShowAddVessel(false); resetAddVesselForm(); }} className="text-muted-foreground hover:text-foreground transition-colors"><X className="w-4 h-4" /></button>
               </div>
               <form onSubmit={handleAddVessel} className="p-6 space-y-4">
                 {addVErr && (
@@ -2310,11 +2627,94 @@ export default function App() {
                     <input value={addVFlag} onChange={e => setAddVFlag(e.target.value)} placeholder="e.g. Marshall Islands" className="w-full bg-secondary border border-border rounded px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/60" />
                   </div>
                 </div>
+
+                <div className="border border-border rounded bg-secondary/20 p-4 space-y-3">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={addVIsSister}
+                      onChange={e => {
+                        setAddVIsSister(e.target.checked);
+                        if (!e.target.checked) {
+                          setAddVReferenceSearch("");
+                          setAddVReferenceVesselId(null);
+                          setAddVSisterStatement(null);
+                        }
+                      }}
+                      className="w-4 h-4 accent-primary"
+                    />
+                    <span className="font-mono text-xs font-bold text-foreground uppercase tracking-widest">Sister Ship</span>
+                  </label>
+
+                  {addVIsSister && (
+                    <div className="space-y-3 pt-1">
+                      <div className="flex items-start gap-2 p-2.5 rounded border border-amber-500/20 bg-amber-500/5">
+                        <Info className="w-3.5 h-3.5 text-amber-400 mt-0.5 shrink-0" />
+                        <p className="text-[11px] text-muted-foreground">Select an existing vessel with an approved SSCS study. Terminal Officer must verify the sister-ship relationship before reference data is locked and reused.</p>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest">Refer to vessel *</label>
+                        {addVReferenceVesselId ? (
+                          <div className="flex items-center gap-2 rounded border border-sky-500/30 bg-sky-500/5 px-3 py-2.5">
+                            <Ship className="w-3.5 h-3.5 text-sky-400" />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-mono text-foreground truncate">{vessels.find(v => v.id === addVReferenceVesselId)?.name}</p>
+                              <p className="text-[10px] font-mono text-muted-foreground">{vessels.find(v => v.id === addVReferenceVesselId)?.imo}</p>
+                            </div>
+                            <button type="button" onClick={() => { setAddVReferenceVesselId(null); setAddVReferenceSearch(""); }} className="text-muted-foreground hover:text-foreground"><X className="w-3.5 h-3.5" /></button>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="relative">
+                              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+                              <input
+                                value={addVReferenceSearch}
+                                onChange={e => setAddVReferenceSearch(e.target.value)}
+                                placeholder="Search vessel name / IMO / call sign"
+                                className="w-full bg-secondary border border-border rounded pl-9 pr-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/60"
+                              />
+                            </div>
+                            <div className="max-h-40 overflow-y-auto border border-border rounded divide-y divide-border">
+                              {addVReferenceCandidates.length > 0 ? addVReferenceCandidates.map(candidate => (
+                                <button
+                                  type="button"
+                                  key={candidate.id}
+                                  onClick={() => { setAddVReferenceVesselId(candidate.id); setAddVReferenceSearch(candidate.name); }}
+                                  className="w-full flex items-center justify-between gap-3 px-3 py-2 text-left hover:bg-secondary transition-colors"
+                                >
+                                  <div className="min-w-0">
+                                    <p className="text-xs font-mono text-foreground truncate">{candidate.name}</p>
+                                    <p className="text-[10px] font-mono text-muted-foreground">{candidate.imo}</p>
+                                  </div>
+                                  <span className="text-[9px] font-mono uppercase tracking-wider text-emerald-400 shrink-0">Approved SSCS</span>
+                                </button>
+                              )) : (
+                                <p className="px-3 py-3 text-[11px] font-mono text-muted-foreground">No approved reference vessel found.</p>
+                              )}
+                            </div>
+                          </>
+                        )}
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest">Sister Ship Statement *</label>
+                        <label className="flex items-center gap-2 border border-dashed border-border hover:border-primary/50 rounded px-3 py-2.5 cursor-pointer transition-colors">
+                          <FileText className="w-3.5 h-3.5 text-muted-foreground" />
+                          <span className="flex-1 text-[11px] font-mono text-muted-foreground truncate">{addVSisterStatement?.name || "Attach Sister Ship Statement"}</span>
+                          <span className="text-[10px] font-mono text-primary">Browse</span>
+                          <input type="file" className="hidden" onChange={e => setAddVSisterStatement(e.target.files?.[0] ?? null)} />
+                        </label>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 <div className="flex gap-3 pt-2">
                   <button type="submit" className="flex-1 flex items-center justify-center gap-2 bg-primary text-primary-foreground font-mono font-semibold text-sm tracking-widest uppercase py-2.5 rounded hover:bg-primary/90 active:scale-[0.98] transition-all">
                     <Plus className="w-4 h-4" />Add Vessel
                   </button>
-                  <button type="button" onClick={() => { setShowAddVessel(false); setAddVErr(""); }} className="px-5 py-2.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary font-mono text-sm transition-colors">Cancel</button>
+                  <button type="button" onClick={() => { setShowAddVessel(false); resetAddVesselForm(); }} className="px-5 py-2.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary font-mono text-sm transition-colors">Cancel</button>
                 </div>
               </form>
             </div>
@@ -2342,13 +2742,17 @@ export default function App() {
     const vesselInactive = v.status === "In Refit";
     const canKickoff = isShip && study?.status === "approved" && (vesselInactive || expiredItems.length > 0);
     const canInitiate = (isTerminal || isShip) && !study;
+    const sisterReferenceVessel = v.referenceVesselId ? vessels.find(candidate => candidate.id === v.referenceVesselId) : undefined;
+    const sisterReferenceStudy = v.sisterReferenceStudyId
+      ? studies.find(candidate => candidate.id === v.sisterReferenceStudyId)
+      : sisterReferenceVessel ? getLatestApprovedStudy(studies, sisterReferenceVessel.id) : undefined;
 
     // Vessel Detail should reflect the information entered in the latest SSCS study.
     // Fall back to the vessel master record only when a General Information field is blank.
     const studyValue = (itemId: string) =>
       study?.items.find(item => item.id === itemId)?.value?.trim() ?? "";
-    const detailName           = studyValue("gi-01") || v.name;
-    const detailImo            = studyValue("gi-02") || v.imo;
+    const detailName           = v.name;
+    const detailImo            = v.imo;
     const detailCallSign       = studyValue("gi-03") || v.callSign || "—";
     const detailFlag           = studyValue("gi-04") || v.flag || "—";
     const detailPort           = studyValue("gi-05") || v.portOfRegistry || "—";
@@ -2409,6 +2813,60 @@ export default function App() {
               </div>
             )}
           </div>
+
+          {v.isSisterShip && (
+            <div className={`border rounded p-5 mb-6 ${
+              v.sisterShipStatus === "verified" ? "border-emerald-500/30 bg-emerald-500/5"
+              : v.sisterShipStatus === "rejected" ? "border-red-500/30 bg-red-500/5"
+              : "border-amber-500/30 bg-amber-500/5"
+            }`}>
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <RefreshCw className={`w-4 h-4 ${v.sisterShipStatus === "verified" ? "text-emerald-400" : v.sisterShipStatus === "rejected" ? "text-red-400" : "text-amber-400"}`} />
+                    <p className="font-mono text-xs font-bold uppercase tracking-widest text-foreground">Sister Ship Reference</p>
+                    <span className={`font-mono text-[9px] uppercase tracking-wider px-2 py-0.5 rounded border ${
+                      v.sisterShipStatus === "verified" ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
+                      : v.sisterShipStatus === "rejected" ? "text-red-400 border-red-500/30 bg-red-500/10"
+                      : "text-amber-400 border-amber-500/30 bg-amber-500/10"
+                    }`}>{v.sisterShipStatus ?? "pending"}</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Refer to <span className="font-mono text-foreground">{sisterReferenceVessel?.name ?? "—"}</span>
+                    {sisterReferenceVessel?.imo ? ` · ${sisterReferenceVessel.imo}` : ""}
+                  </p>
+                  {v.sisterShipStatus === "verified" && sisterReferenceStudy && (
+                    <p className="font-mono text-[10px] text-muted-foreground mt-1">Reference SSCS: {sisterReferenceStudy.id}</p>
+                  )}
+                  {v.sisterShipStatus === "pending" && !sisterReferenceStudy && (
+                    <p className="text-[11px] text-red-400 mt-2">The reference vessel has no approved SSCS study and cannot be verified yet.</p>
+                  )}
+                </div>
+                {isTerminal && v.sisterShipStatus === "pending" && (
+                  <div className="flex gap-2 shrink-0">
+                    <button
+                      onClick={() => verifySisterShip(v)}
+                      disabled={!sisterReferenceStudy}
+                      className="flex items-center gap-1.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 hover:bg-emerald-500/20 disabled:opacity-40 disabled:cursor-not-allowed font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors"
+                    >
+                      <ShieldCheck className="w-3.5 h-3.5" />Verify Sister Ship
+                    </button>
+                    <button
+                      onClick={() => rejectSisterShip(v)}
+                      className="flex items-center gap-1.5 bg-red-500/10 text-red-400 border border-red-500/25 hover:bg-red-500/20 font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors"
+                    >
+                      <ShieldX className="w-3.5 h-3.5" />Reject
+                    </button>
+                  </div>
+                )}
+              </div>
+              {v.sisterShipStatus === "verified" && (
+                <p className="text-[11px] text-muted-foreground mt-3 pt-3 border-t border-emerald-500/15">
+                  Ship Major Dimensions, Fender / Flat Body, Mooring Arrangement, Gangway, Unloading Arm, Cargo Management, Ship Shore Link System and Utility System are inherited from the verified reference study. Required Documents 2.1–2.5, 3.x and 4.x are referenced from the same study; 2.6 remains vessel-specific.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* SSCS Study section */}
           <div className="border border-border rounded bg-card p-6">
@@ -2681,6 +3139,18 @@ export default function App() {
     const pct = completionPct(activeStudy);
 
     const vessel = vessels.find(v => v.id === activeStudy.vesselId);
+    const canRenameShip = Boolean(vessel && (isTerminal || currentUser.isAdmin || vessel.createdById === uid));
+    const verifiedSisterShip = Boolean(vessel?.isSisterShip && vessel.sisterShipStatus === "verified");
+    const referenceVessel = vessel?.referenceVesselId ? vessels.find(candidate => candidate.id === vessel.referenceVesselId) : undefined;
+    const inheritedSectionReadOnly = (section: string) => verifiedSisterShip && [
+      "Fender / Flat Body",
+      "Mooring Arrangement",
+      "Gangway",
+      "Unloading Arm",
+      "Cargo Management",
+      "Ship Shore Link System",
+      "Utility System",
+    ].includes(section);
 
     return (
       <div className="min-h-screen bg-background" style={font}>
@@ -2726,6 +3196,16 @@ export default function App() {
               ))}
             </div>
           </div>
+
+          {verifiedSisterShip && referenceVessel && (
+            <div className="mb-4 flex items-start gap-2.5 rounded border border-sky-500/25 bg-sky-500/5 px-4 py-3">
+              <Info className="w-4 h-4 text-sky-400 mt-0.5 shrink-0" />
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-widest text-sky-400 font-bold">Verified Sister Ship · Refer to {referenceVessel.name}</p>
+                <p className="text-[11px] text-muted-foreground mt-1">Reference sections are read-only in this study. Vessel-specific information, Required Document 2.6, CTMS, SDPs, Attachment and Quality Assessment remain local to this vessel.</p>
+              </div>
+            </div>
+          )}
 
           {/* Action bar */}
           <div className="border border-border rounded bg-card px-5 py-3.5 mb-6 flex flex-wrap gap-2 items-center">
@@ -2823,7 +3303,7 @@ export default function App() {
                 const isActive = studyTab === tab.section;
 
                 const isComplete = isReqDocsTab
-                  ? isRequiredDocumentsComplete(activeStudy.requiredDocuments)
+                  ? isRequiredDocumentsComplete(activeStudy.requiredDocuments, Boolean(vessel?.isSisterShip))
                   : isAttachmentTab
                   ? isAttachmentComplete(activeStudy.attachmentData)
                   : isQualityTab
@@ -2884,6 +3364,10 @@ export default function App() {
                   onUploadFile={supabaseConfigured ? handleDocumentUpload : undefined}
                   onDeleteFile={supabaseConfigured ? handleDocumentDelete : undefined}
                   getDownloadUrl={supabaseConfigured ? handleDocumentDownload : undefined}
+                  sisterShip={Boolean(vessel?.isSisterShip)}
+                  sisterShipVerified={verifiedSisterShip}
+                  referenceVesselName={referenceVessel?.name}
+                  inheritedKeys={verifiedSisterShip ? SISTER_BORROWED_DOC_KEYS : []}
                 />
               );
             }
@@ -2917,7 +3401,7 @@ export default function App() {
             if (studyTab === "Fender / Flat Body") {
               return (
                 <FenderFlatBodySection
-                  canEdit={canEdit}
+                  canEdit={canEdit && !inheritedSectionReadOnly("Fender / Flat Body")}
                   flatBodyData={activeStudy.flatBodyData ?? defaultFlatBodyData()}
                   fenderReactionData={activeStudy.fenderReactionData ?? defaultFenderReactionData()}
                   berthingEnergyData={{
@@ -2935,7 +3419,7 @@ export default function App() {
             if (studyTab === "Mooring Arrangement") {
               return (
                 <MooringArrangementSection
-                  canEdit={canEdit}
+                  canEdit={canEdit && !inheritedSectionReadOnly("Mooring Arrangement")}
                   data={activeStudy.mooringArrangementData ?? defaultMooringArrangementData()}
                   onChange={updateMooringArrangementData}
                 />
@@ -2947,7 +3431,7 @@ export default function App() {
               const getItem = (id: string) => activeStudy.items.find(i => i.id === id)?.value ?? "";
               return (
                 <UnloadingArmSection
-                  canEdit={canEdit}
+                  canEdit={canEdit && !inheritedSectionReadOnly("Unloading Arm")}
                   data={activeStudy.unloadingArmData ?? defaultUnloadingArmData()}
                   onChange={updateUnloadingArmData}
                   manifoldHeightBL={getItem("gi-19")}
@@ -2962,7 +3446,7 @@ export default function App() {
               const getItem = (id: string) => activeStudy.items.find(i => i.id === id)?.value ?? "";
               return (
                 <GangwaySection
-                  canEdit={canEdit}
+                  canEdit={canEdit && !inheritedSectionReadOnly("Gangway")}
                   data={activeStudy.gangwayData ?? defaultGangwayData()}
                   onChange={updateGangwayData}
                   upperDeckHeightBL={getItem("gi-18")}
@@ -2976,7 +3460,7 @@ export default function App() {
             if (studyTab === "Ship Shore Link System") {
               return (
                 <ShipShoreLinkSection
-                  canEdit={canEdit}
+                  canEdit={canEdit && !inheritedSectionReadOnly("Ship Shore Link System")}
                   data={activeStudy.shipShoreLinkData ?? defaultShipShoreLinkData()}
                   onChange={updateShipShoreLinkData}
                 />
@@ -2987,7 +3471,7 @@ export default function App() {
             if (studyTab === "Cargo Management") {
               return (
                 <CargoManagementSection
-                  canEdit={canEdit}
+                  canEdit={canEdit && !inheritedSectionReadOnly("Cargo Management")}
                   data={activeStudy.cargoManagementData ?? defaultCargoManagementData()}
                   onChange={updateCargoManagementData}
                 />
@@ -3020,7 +3504,7 @@ export default function App() {
             if (studyTab === "Utility System") {
               return (
                 <UtilitySystemSection
-                  canEdit={canEdit}
+                  canEdit={canEdit && !inheritedSectionReadOnly("Utility System")}
                   data={activeStudy.utilityData ?? defaultUtilityData()}
                   onChange={updateUtilityData}
                 />
@@ -3051,21 +3535,78 @@ export default function App() {
             const useSubTabs = studyTab === "General Information" && groupNames.length > 1;
             const activeGroup = useSubTabs ? generalInfoSubTab : null;
 
-            const renderItems = (tmplItems: TemplateItem[]) => (
+            const renderItems = (tmplItems: TemplateItem[], forceReadOnly = false) => (
               <div className="divide-y divide-border/40">
                 {tmplItems.map(tmpl => {
                   const item = activeStudy.items.find(i => i.id === tmpl.id);
                   if (!item) return null;
-                  const filled = item.value.trim() !== "";
+                  const canonicalIdentityValue = tmpl.id === "gi-01"
+                    ? (vessel?.name ?? item.value)
+                    : tmpl.id === "gi-02"
+                      ? (vessel?.imo ?? item.value)
+                      : item.value;
+                  const filled = canonicalIdentityValue.trim() !== "";
+                  const isShipName = tmpl.id === "gi-01";
+                  const isImo = tmpl.id === "gi-02";
                   return (
                     <div key={item.id} className={`px-5 py-2.5 transition-colors ${filled ? "bg-emerald-500/[0.03]" : ""}`}>
                       <div className="grid items-center gap-x-4" style={{ gridTemplateColumns: "minmax(180px,38%) 1fr auto" }}>
                         <span className="flex items-center gap-2 text-xs text-foreground">
                           <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${filled ? "bg-emerald-400" : "bg-border"}`} />
                           {item.name}
+                          {isImo && <Lock className="w-3 h-3 text-muted-foreground" />}
                           {item.isCorrected && <span className="font-mono text-[9px] text-sky-400 border border-sky-500/30 rounded px-1">Corrected</span>}
                         </span>
-                        {canEdit ? (
+                        {isShipName ? (
+                          canEdit && canRenameShip && !forceReadOnly ? (
+                            shipNameEditing ? (
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="text"
+                                  value={shipNameDraft}
+                                  onChange={e => setShipNameDraft(e.target.value)}
+                                  placeholder="New ship name"
+                                  className={inputCls}
+                                  autoFocus
+                                />
+                                <button
+                                  type="button"
+                                  onClick={handleRenameVessel}
+                                  disabled={shipNameSaving}
+                                  className="shrink-0 rounded bg-primary px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-wider text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                                >
+                                  {shipNameSaving ? "Saving…" : "Save"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => { setShipNameEditing(false); setShipNameDraft(""); }}
+                                  disabled={shipNameSaving}
+                                  className="shrink-0 rounded border border-border px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:bg-secondary disabled:opacity-50"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-2">
+                                <span className="flex-1 rounded border border-border bg-secondary/50 px-2.5 py-1.5 text-sm text-foreground">{canonicalIdentityValue || "—"}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => { setShipNameDraft(canonicalIdentityValue); setShipNameEditing(true); }}
+                                  className="shrink-0 rounded border border-primary/30 bg-primary/5 px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-wider text-primary hover:bg-primary/10"
+                                >
+                                  Change
+                                </button>
+                              </div>
+                            )
+                          ) : (
+                            <span className="text-sm text-foreground">{canonicalIdentityValue || <span className="text-muted-foreground/50">—</span>}</span>
+                          )
+                        ) : isImo ? (
+                          <div className="flex items-center gap-2">
+                            <span className="flex-1 rounded border border-border bg-secondary/50 px-2.5 py-1.5 text-sm text-foreground">{canonicalIdentityValue || "—"}</span>
+                            <span className="shrink-0 rounded border border-border px-2 py-1 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">Locked</span>
+                          </div>
+                        ) : canEdit && !forceReadOnly ? (
                           tmpl.inputType === "select" ? (
                             <select value={item.value} onChange={e => updateItem(item.id, "value", e.target.value)} className={selectCls}>
                               <option value="">— Select —</option>
@@ -3075,7 +3616,7 @@ export default function App() {
                             <input type="text" value={item.value} onChange={e => updateItem(item.id, "value", e.target.value)} placeholder="—" className={inputCls} />
                           )
                         ) : (
-                          <span className="text-sm text-foreground">{item.value || <span className="text-muted-foreground/50">—</span>}</span>
+                          <span className="text-sm text-foreground">{canonicalIdentityValue || <span className="text-muted-foreground/50">—</span>}</span>
                         )}
                         <span className={`font-mono text-xs text-muted-foreground whitespace-nowrap ${tmpl.unit ? "" : "invisible"}`}>{tmpl.unit ?? "·"}</span>
                       </div>
@@ -3127,7 +3668,7 @@ export default function App() {
                       );
                     })}
                   </div>
-                  {renderItems(groupMap[visibleGroup])}
+                  {renderItems(groupMap[visibleGroup], verifiedSisterShip && visibleGroup === "Ship Major Dimensions")}
                 </div>
               );
             }
@@ -3141,7 +3682,7 @@ export default function App() {
                         <p className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest">{groupName}</p>
                       </div>
                     )}
-                    {renderItems(tmplItems)}
+                    {renderItems(tmplItems, verifiedSisterShip && studyTab === "General Information" && groupName === "Ship Major Dimensions")}
                   </div>
                 ))}
               </div>

@@ -20,27 +20,30 @@ export type DocKey =
   | "d_2_1" | "d_2_2" | "d_2_3" | "d_2_4" | "d_2_5" | "d_2_6"
   | "d_3_1" | "d_3_2" | "d_3_3" | "d_3_4"
   | "d_4_1" | "d_4_2"
-  | "d_5_1" | "d_5_2" | "d_5_3";
+  | "d_5_1" | "d_5_2" | "d_5_3"
+  | "d_6_1";
 
 export type RequiredDocumentsData = Record<DocKey, UploadedFile[]>;
 
 // ─── Defaults ─────────────────────────────────────────────────────────────────
 
-const ALL_KEYS: DocKey[] = [
+const BASE_KEYS: DocKey[] = [
   "d_1_1", "d_1_2", "d_1_3",
   "d_2_1", "d_2_2", "d_2_3", "d_2_4", "d_2_5", "d_2_6",
   "d_3_1", "d_3_2", "d_3_3", "d_3_4",
   "d_4_1", "d_4_2",
   "d_5_1", "d_5_2", "d_5_3",
 ];
+const ALL_KEYS: DocKey[] = [...BASE_KEYS, "d_6_1"];
 
 export function defaultRequiredDocumentsData(): RequiredDocumentsData {
   return Object.fromEntries(ALL_KEYS.map(k => [k, []])) as RequiredDocumentsData;
 }
 
-export function isRequiredDocumentsComplete(data: RequiredDocumentsData | undefined): boolean {
+export function isRequiredDocumentsComplete(data: RequiredDocumentsData | undefined, sisterShip = false): boolean {
   const d = data ?? defaultRequiredDocumentsData();
-  return ALL_KEYS.every(k => d[k].length > 0);
+  const required = sisterShip ? ALL_KEYS : BASE_KEYS;
+  return required.every(k => (d[k]?.length ?? 0) > 0);
 }
 
 // ─── Document catalogue ───────────────────────────────────────────────────────
@@ -92,6 +95,12 @@ const GROUPS: DocGroup[] = [
       { key: "d_5_3", num: "5.3", label: "Certificate of Gas Flow Meter" },
     ],
   },
+  {
+    title: "6. Sister Ship",
+    items: [
+      { key: "d_6_1", num: "6.1", label: "Sister Ship Statement" },
+    ],
+  },
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -115,9 +124,16 @@ interface Props {
   onUploadFile?: (docKey: DocKey, file: File) => Promise<UploadedFile>;
   onDeleteFile?: (file: UploadedFile) => Promise<void>;
   getDownloadUrl?: (file: UploadedFile) => Promise<string>;
+  sisterShip?: boolean;
+  sisterShipVerified?: boolean;
+  referenceVesselName?: string;
+  inheritedKeys?: DocKey[];
 }
 
-export function RequiredDocumentsSection({ canEdit, data: dp, onChange, onUploadFile, onDeleteFile, getDownloadUrl }: Props) {
+export function RequiredDocumentsSection({
+  canEdit, data: dp, onChange, onUploadFile, onDeleteFile, getDownloadUrl,
+  sisterShip = false, sisterShipVerified = false, referenceVesselName, inheritedKeys = [],
+}: Props) {
   const data = dp ?? defaultRequiredDocumentsData();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [activeKey, setActiveKey] = useState<DocKey | null>(null);
@@ -194,9 +210,11 @@ export function RequiredDocumentsSection({ canEdit, data: dp, onChange, onUpload
     }
   }
 
-  const totalUploaded = ALL_KEYS.reduce((n, k) => n + (data[k]?.length ?? 0), 0);
-  const totalRequired = ALL_KEYS.length;
-  const slotsWithFile = ALL_KEYS.filter(k => (data[k]?.length ?? 0) > 0).length;
+  const visibleKeys = sisterShip ? ALL_KEYS : BASE_KEYS;
+  const totalUploaded = visibleKeys.reduce((n, k) => n + (data[k]?.length ?? 0), 0);
+  const totalRequired = visibleKeys.length;
+  const slotsWithFile = visibleKeys.filter(k => (data[k]?.length ?? 0) > 0).length;
+  const inherited = new Set(inheritedKeys);
 
   return (
     <div className="mb-6">
@@ -228,8 +246,15 @@ export function RequiredDocumentsSection({ canEdit, data: dp, onChange, onUpload
           </div>
         </div>
 
+        {sisterShipVerified && referenceVesselName && (
+          <div className="border-b border-sky-500/20 bg-sky-500/5 px-5 py-2.5">
+            <p className="font-mono text-[10px] text-sky-400">
+              Verified sister ship — Drawing 2.1–2.5, Manual 3.x and Optimoor 4.x are referenced from {referenceVesselName}. Item 2.6 remains vessel-specific.
+            </p>
+          </div>
+        )}
         <div className="p-5 space-y-6">
-          {GROUPS.map(group => (
+          {GROUPS.filter(group => sisterShip || group.title !== "6. Sister Ship").map(group => (
             <div key={group.title}>
               {/* Group heading */}
               <div className="flex items-center gap-3 mb-3">
@@ -244,6 +269,9 @@ export function RequiredDocumentsSection({ canEdit, data: dp, onChange, onUpload
                 {group.items.map(({ key, num, label }) => {
                   const files = data[key] ?? [];
                   const hasFiles = files.length > 0;
+                  const isInherited = sisterShipVerified && inherited.has(key);
+                  const isLockedStatement = sisterShipVerified && key === "d_6_1";
+                  const isLocked = isInherited || isLockedStatement;
 
                   return (
                     <div key={key} className={`px-4 py-3 transition-colors ${hasFiles ? "bg-emerald-500/[0.03]" : ""}`}>
@@ -256,7 +284,17 @@ export function RequiredDocumentsSection({ canEdit, data: dp, onChange, onUpload
 
                         {/* Label */}
                         <div className="flex-1 min-w-0">
-                          <p className="font-mono text-xs text-foreground font-semibold mb-1.5">{label}</p>
+                          <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                            <p className="font-mono text-xs text-foreground font-semibold">{label}</p>
+                            {isInherited && (
+                              <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-sky-500/25 bg-sky-500/8 text-sky-400">
+                                From {referenceVesselName || "reference ship"}
+                              </span>
+                            )}
+                            {isLockedStatement && (
+                              <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-emerald-500/25 bg-emerald-500/8 text-emerald-400">Verified statement</span>
+                            )}
+                          </div>
 
                           {/* Uploaded files list */}
                           {files.length > 0 && (
@@ -274,7 +312,7 @@ export function RequiredDocumentsSection({ canEdit, data: dp, onChange, onUpload
                                     className="text-muted-foreground hover:text-primary transition-colors shrink-0">
                                     <Download className="w-3 h-3" />
                                   </button>
-                                  {canEdit && (
+                                  {canEdit && !isLocked && (
                                     <button
                                       onClick={() => removeFile(key, file.id)}
                                       title="Remove"
@@ -288,7 +326,7 @@ export function RequiredDocumentsSection({ canEdit, data: dp, onChange, onUpload
                           )}
 
                           {/* Upload button */}
-                          {canEdit && (
+                          {canEdit && !isLocked && (
                             <button
                               onClick={() => triggerUpload(key)}
                               disabled={loading && activeKey === key}
@@ -299,8 +337,10 @@ export function RequiredDocumentsSection({ canEdit, data: dp, onChange, onUpload
                           )}
 
                           {/* Read-only empty state */}
-                          {!canEdit && !hasFiles && (
-                            <span className="font-mono text-[11px] text-muted-foreground/50">No document uploaded</span>
+                          {(!canEdit || isLocked) && !hasFiles && (
+                            <span className="font-mono text-[11px] text-muted-foreground/50">
+                              {isInherited ? "No document available on the reference ship" : "No document uploaded"}
+                            </span>
                           )}
                         </div>
 

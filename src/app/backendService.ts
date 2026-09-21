@@ -101,6 +101,12 @@ function vesselFromRow(row: any): AnyVessel {
     gasMgmt2: row.gas_mgmt_2 ?? "N/A",
     status: row.status ?? "Active",
     createdById: row.created_by ?? undefined,
+    isSisterShip: Boolean(row.is_sister_ship),
+    referenceVesselId: row.reference_vessel_id == null ? undefined : Number(row.reference_vessel_id),
+    sisterShipStatus: row.sister_ship_status ?? "none",
+    sisterShipVerifiedById: row.sister_ship_verified_by ?? undefined,
+    sisterShipVerifiedAt: row.sister_ship_verified_at ?? undefined,
+    sisterReferenceStudyId: row.sister_reference_study_id ?? undefined,
   };
 }
 
@@ -122,6 +128,12 @@ function vesselToRow(vessel: AnyVessel) {
     gas_mgmt_2: vessel.gasMgmt2 || null,
     status: vessel.status || "Active",
     created_by: vessel.createdById || null,
+    is_sister_ship: Boolean(vessel.isSisterShip),
+    reference_vessel_id: vessel.referenceVesselId ?? null,
+    sister_ship_status: vessel.sisterShipStatus ?? (vessel.isSisterShip ? "pending" : "none"),
+    sister_ship_verified_by: vessel.sisterShipVerifiedById ?? null,
+    sister_ship_verified_at: vessel.sisterShipVerifiedAt ?? null,
+    sister_reference_study_id: vessel.sisterReferenceStudyId ?? null,
   };
 }
 
@@ -336,6 +348,50 @@ export async function createVessel(vessel: AnyVessel): Promise<AnyVessel> {
   // Let Postgres generate the ID unless the caller deliberately supplied one.
   if (String(vessel.id ?? "").startsWith("local-")) delete row.id;
   const { data, error } = await client.from("vessels").insert(row).select("*").single();
+  if (error) throw error;
+  return vesselFromRow(data);
+}
+
+export async function renameVesselEverywhere(vesselId: number, newName: string): Promise<AnyVessel> {
+  const client = requireSupabase();
+  const normalizedName = newName.trim();
+  if (!normalizedName) throw new Error("Vessel name is required.");
+
+  const { error: renameError } = await client.rpc("rename_vessel_everywhere", {
+    p_vessel_id: vesselId,
+    p_new_name: normalizedName,
+  });
+  if (renameError) throw renameError;
+
+  const { data, error } = await client
+    .from("vessels")
+    .select("*")
+    .eq("id", vesselId)
+    .single();
+  if (error) throw error;
+  return vesselFromRow(data);
+}
+
+export async function updateSisterShipVerification(opts: {
+  vesselId: number;
+  status: "pending" | "verified" | "rejected";
+  referenceStudyId?: string | null;
+  verifiedById?: string | null;
+}): Promise<AnyVessel> {
+  const client = requireSupabase();
+  const verified = opts.status === "verified";
+  const { data, error } = await client
+    .from("vessels")
+    .update({
+      sister_ship_status: opts.status,
+      sister_reference_study_id: verified ? (opts.referenceStudyId ?? null) : null,
+      sister_ship_verified_by: verified ? (opts.verifiedById ?? null) : null,
+      sister_ship_verified_at: verified ? new Date().toISOString() : null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", opts.vesselId)
+    .select("*")
+    .single();
   if (error) throw error;
   return vesselFromRow(data);
 }
