@@ -162,6 +162,25 @@ export function getInvalidCertificateCount(data: QualityAssessmentData | undefin
   }).length;
 }
 
+/** Return the number of non-permanent certificates expiring from today through N days ahead. */
+export function getExpiringCertificateCount(data: QualityAssessmentData | undefined, daysAhead = 90): number {
+  if (!data) return 0;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const limit = new Date(today);
+  limit.setDate(limit.getDate() + daysAhead);
+
+  return (Object.keys(data.certificates) as CertificateKey[]).filter(key => {
+    if (PERMANENT_KEYS.has(key)) return false;
+    const iso = normalizeDateValue(data.certificates[key]?.validDate ?? "");
+    if (!iso) return false;
+    const [year, month, day] = iso.split("-").map(Number);
+    const expiry = new Date(year, month - 1, day);
+    return expiry >= today && expiry <= limit;
+  }).length;
+}
+
 export function isQualityAssessmentComplete(data: QualityAssessmentData | undefined): boolean {
   const d = data ?? defaultQualityAssessmentData();
   const certificateComplete = (Object.keys(d.certificates) as CertificateKey[]).every(key => {

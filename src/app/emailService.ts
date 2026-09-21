@@ -145,6 +145,43 @@ export async function notifyShipOfficerEditApproved(opts: {
   );
 }
 
+export async function notifyShipOfficerRevisionRequested(opts: {
+  vesselName: string;
+  requestedByName: string;
+  shipEmail: string;
+}) {
+  await send(
+    opts.shipEmail,
+    `SSCS Revision Requested — ${opts.vesselName}`,
+    `The Terminal Officer has requested a revision to your submitted SSCS study.\n\nVessel       : ${opts.vesselName}\nRequested by : ${opts.requestedByName}\n\nThe study has been returned to Draft. Please log in, review the Terminal Officer comments, make the required corrections, and submit the study again.`,
+  );
+}
+
+export async function notifyTerminalOfficerEditRequested(opts: {
+  vesselName: string;
+  requesterName: string;
+  requesterEmail: string;
+  terminalEmail: string;
+}) {
+  await send(
+    opts.terminalEmail,
+    `SSCS Edit Request — ${opts.vesselName}`,
+    `A Ship Officer has requested permission to edit an approved SSCS study.\n\nVessel       : ${opts.vesselName}\nRequested by : ${opts.requesterName} (${opts.requesterEmail})\n\nPlease log in to the LMPT2 SSCS system to approve or reject this edit request.`,
+  );
+}
+
+export async function notifyShipOfficerEditRejected(opts: {
+  vesselName: string;
+  rejectedByName: string;
+  shipEmail: string;
+}) {
+  await send(
+    opts.shipEmail,
+    `Edit Request Rejected — ${opts.vesselName}`,
+    `Your request to edit the approved SSCS study has been rejected.\n\nVessel      : ${opts.vesselName}\nRejected by : ${opts.rejectedByName}\n\nThe approved study remains locked. Please contact the Terminal Officer if further clarification is required.`,
+  );
+}
+
 export async function sendOTPEmail(opts: {
   toEmail: string;
   userName: string;

@@ -17,6 +17,9 @@ import {
   notifyTerminalOfficerStudySubmitted,
   notifyShipOfficerStudyApproved,
   notifyShipOfficerEditApproved,
+  notifyShipOfficerRevisionRequested,
+  notifyTerminalOfficerEditRequested,
+  notifyShipOfficerEditRejected,
   sendOTPEmail,
   adminNotificationEmails,
 } from "./emailService";
@@ -105,6 +108,7 @@ import {
   defaultQualityAssessmentData,
   isQualityAssessmentComplete,
   getInvalidCertificateCount,
+  getExpiringCertificateCount,
 } from "./components/QualityAssessmentSection";
 import type { QualityAssessmentData } from "./components/QualityAssessmentSection";
 
@@ -703,6 +707,18 @@ function CertificateInvalidBadge({ count }: { count: number }) {
     >
       <AlertTriangle className="w-3 h-3" />
       Certificate Invalid{count > 1 ? ` (${count})` : ""}
+    </span>
+  );
+}
+
+function CertificateExpiringBadge({ count }: { count: number }) {
+  return (
+    <span
+      title={`${count} certificate${count === 1 ? "" : "s"} will expire within 90 days`}
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-semibold tracking-wider uppercase border bg-amber-500/10 text-amber-400 border-amber-500/30"
+    >
+      <AlertTriangle className="w-3 h-3" />
+      Certificate Expiring{count > 1 ? ` (${count})` : ""}
     </span>
   );
 }
@@ -1409,6 +1425,39 @@ export default function App() {
     }
   }
 
+  function notifyTerminalOfficersOfEditRequest(study: SSCSStudy, requester: UserAccount) {
+    users
+      .filter(u => u.role === "terminal_officer" && u.status === "approved")
+      .forEach(u => {
+        void notifyTerminalOfficerEditRequested({
+          vesselName: study.vesselName,
+          requesterName: requester.name,
+          requesterEmail: requester.email,
+          terminalEmail: u.email,
+        }).catch(err => console.error("[Edit request email failed]", err));
+      });
+  }
+
+  function notifyShipOfficerOfEditApproval(study: SSCSStudy, approvedByName: string) {
+    const shipUser = users.find(u => u.id === study.initiatedById);
+    if (!shipUser) return;
+    void notifyShipOfficerEditApproved({
+      vesselName: study.vesselName,
+      approvedByName,
+      shipEmail: shipUser.email,
+    }).catch(err => console.error("[Edit approval email failed]", err));
+  }
+
+  function notifyShipOfficerOfEditRejection(study: SSCSStudy, rejectedByName: string) {
+    const shipUser = users.find(u => u.id === study.initiatedById);
+    if (!shipUser) return;
+    void notifyShipOfficerEditRejected({
+      vesselName: study.vesselName,
+      rejectedByName,
+      shipEmail: shipUser.email,
+    }).catch(err => console.error("[Edit rejection email failed]", err));
+  }
+
   function submitStudy() {
     if (!activeStudy || !currentUser) return;
     const pct = completionPct(activeStudy);
@@ -1431,29 +1480,37 @@ export default function App() {
   }
 
   function requestRevision() {
-    if (!activeStudy) return;
+    if (!activeStudy || !currentUser) return;
     syncStudy({ ...activeStudy, status: "draft" }, true);
+    const shipUser = users.find(u => u.id === activeStudy.initiatedById);
+    if (shipUser) {
+      void notifyShipOfficerRevisionRequested({
+        vesselName: activeStudy.vesselName,
+        requestedByName: currentUser.name,
+        shipEmail: shipUser.email,
+      }).catch(err => console.error("[Revision request email failed]", err));
+    }
     showToast("Revision requested. Study returned to draft.", "info");
   }
 
   function requestEdit() {
     if (!activeStudy || !currentUser) return;
     syncStudy({ ...activeStudy, status: "edit_requested", editRequestedById: currentUser.id, editRequestedByName: currentUser.name, editRequestedAt: new Date().toISOString() }, true);
+    notifyTerminalOfficersOfEditRequest(activeStudy, currentUser);
     showToast("Edit request sent to Terminal Officer.", "info");
   }
 
   function approveEditRequest() {
     if (!activeStudy || !currentUser) return;
     syncStudy({ ...activeStudy, status: "editing" }, true);
-    const shipUser = users.find(u => u.id === activeStudy.initiatedById);
-    if (shipUser)
-      notifyShipOfficerEditApproved({ vesselName: activeStudy.vesselName, approvedByName: currentUser.name, shipEmail: shipUser.email });
+    notifyShipOfficerOfEditApproval(activeStudy, currentUser.name);
     showToast("Edit request approved. User may now edit.", "success");
   }
 
   function rejectEditRequest() {
-    if (!activeStudy) return;
+    if (!activeStudy || !currentUser) return;
     syncStudy({ ...activeStudy, status: "approved", editRequestedById: undefined, editRequestedByName: undefined, editRequestedAt: undefined }, true);
+    notifyShipOfficerOfEditRejection(activeStudy, currentUser.name);
     showToast("Edit request rejected. Study remains locked.", "info");
   }
 
@@ -1934,6 +1991,9 @@ export default function App() {
                   const invalidCertificateCount = study
                     ? getInvalidCertificateCount(study.qualityAssessmentData)
                     : 0;
+                  const expiringCertificateCount = study?.status === "approved"
+                    ? getExpiringCertificateCount(study.qualityAssessmentData, 90)
+                    : 0;
                   return (
                     <div key={v.id}
                       className={`w-full grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-4 px-5 py-3.5 items-center hover:bg-secondary/60 transition-colors group ${i < display.length - 1 ? "border-b border-border/50" : ""}`}>
@@ -1948,6 +2008,9 @@ export default function App() {
                             {study && <StudyBadge status={study.status} />}
                             {invalidCertificateCount > 0 && (
                               <CertificateInvalidBadge count={invalidCertificateCount} />
+                            )}
+                            {expiringCertificateCount > 0 && (
+                              <CertificateExpiringBadge count={expiringCertificateCount} />
                             )}
                           </div>
                         </div>
@@ -2506,11 +2569,11 @@ export default function App() {
                   {/* Terminal: approve/reject edit request */}
                   {isTerminal && study.status === "edit_requested" && (
                     <>
-                      <button onClick={() => { syncStudy({ ...study, status: "editing" }); showToast("Edit request approved.", "success"); }}
+                      <button onClick={() => { syncStudy({ ...study, status: "editing" }); notifyShipOfficerOfEditApproval(study, currentUser.name); showToast("Edit request approved.", "success"); }}
                         className="flex items-center gap-2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 font-mono font-semibold text-xs uppercase px-4 py-2 rounded transition-colors">
                         <CheckCircle2 className="w-3.5 h-3.5" />Approve Edit
                       </button>
-                      <button onClick={() => { syncStudy({ ...study, status: "approved", editRequestedById: undefined, editRequestedByName: undefined, editRequestedAt: undefined }); showToast("Edit request rejected.", "info"); }}
+                      <button onClick={() => { syncStudy({ ...study, status: "approved", editRequestedById: undefined, editRequestedByName: undefined, editRequestedAt: undefined }); notifyShipOfficerOfEditRejection(study, currentUser.name); showToast("Edit request rejected.", "info"); }}
                         className="flex items-center gap-2 bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 font-mono font-semibold text-xs uppercase px-4 py-2 rounded transition-colors">
                         <XCircle className="w-3.5 h-3.5" />Reject Edit
                       </button>
@@ -2525,7 +2588,7 @@ export default function App() {
                     </button>
                   )}
                   {isShip && study.initiatedById === currentUser.id && study.status === "approved" && !study.editRequestedById && !canKickoff && (
-                    <button onClick={() => { syncStudy({ ...study, status: "edit_requested", editRequestedById: currentUser.id, editRequestedByName: currentUser.name, editRequestedAt: new Date().toISOString() }); showToast("Edit request sent to Terminal Officer.", "info"); }}
+                    <button onClick={() => { syncStudy({ ...study, status: "edit_requested", editRequestedById: currentUser.id, editRequestedByName: currentUser.name, editRequestedAt: new Date().toISOString() }); notifyTerminalOfficersOfEditRequest(study, currentUser); showToast("Edit request sent to Terminal Officer.", "info"); }}
                       className="flex items-center gap-2 px-4 py-2 rounded border border-orange-500/30 bg-orange-500/8 text-orange-400 hover:bg-orange-500/15 text-xs font-mono font-semibold uppercase transition-colors">
                       <Edit3 className="w-3.5 h-3.5" />Request to Edit
                     </button>

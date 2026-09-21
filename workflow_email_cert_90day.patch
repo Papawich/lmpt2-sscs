@@ -1,0 +1,245 @@
+diff --git a/src/app/App.tsx b/src/app/App.tsx
+index b42b4e4..529fed3 100644
+--- a/src/app/App.tsx
++++ b/src/app/App.tsx
+@@ -17,6 +17,9 @@ import {
+   notifyTerminalOfficerStudySubmitted,
+   notifyShipOfficerStudyApproved,
+   notifyShipOfficerEditApproved,
++  notifyShipOfficerRevisionRequested,
++  notifyTerminalOfficerEditRequested,
++  notifyShipOfficerEditRejected,
+   sendOTPEmail,
+   adminNotificationEmails,
+ } from "./emailService";
+@@ -105,6 +108,7 @@ import {
+   defaultQualityAssessmentData,
+   isQualityAssessmentComplete,
+   getInvalidCertificateCount,
++  getExpiringCertificateCount,
+ } from "./components/QualityAssessmentSection";
+ import type { QualityAssessmentData } from "./components/QualityAssessmentSection";
+ 
+@@ -707,6 +711,18 @@ function CertificateInvalidBadge({ count }: { count: number }) {
+   );
+ }
+ 
++function CertificateExpiringBadge({ count }: { count: number }) {
++  return (
++    <span
++      title={`${count} certificate${count === 1 ? "" : "s"} will expire within 90 days`}
++      className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-semibold tracking-wider uppercase border bg-amber-500/10 text-amber-400 border-amber-500/30"
++    >
++      <AlertTriangle className="w-3 h-3" />
++      Certificate Expiring{count > 1 ? ` (${count})` : ""}
++    </span>
++  );
++}
++
+ function Toast({ msg, type }: { msg: string; type: "success" | "error" | "info" }) {
+   return (
+     <div className={`fixed bottom-20 right-6 z-[999] flex items-center gap-2.5 px-4 py-3 rounded border shadow-2xl font-mono text-sm animate-in slide-in-from-bottom-4 ${
+@@ -1409,6 +1425,39 @@ export default function App() {
+     }
+   }
+ 
++  function notifyTerminalOfficersOfEditRequest(study: SSCSStudy, requester: UserAccount) {
++    users
++      .filter(u => u.role === "terminal_officer" && u.status === "approved")
++      .forEach(u => {
++        void notifyTerminalOfficerEditRequested({
++          vesselName: study.vesselName,
++          requesterName: requester.name,
++          requesterEmail: requester.email,
++          terminalEmail: u.email,
++        }).catch(err => console.error("[Edit request email failed]", err));
++      });
++  }
++
++  function notifyShipOfficerOfEditApproval(study: SSCSStudy, approvedByName: string) {
++    const shipUser = users.find(u => u.id === study.initiatedById);
++    if (!shipUser) return;
++    void notifyShipOfficerEditApproved({
++      vesselName: study.vesselName,
++      approvedByName,
++      shipEmail: shipUser.email,
++    }).catch(err => console.error("[Edit approval email failed]", err));
++  }
++
++  function notifyShipOfficerOfEditRejection(study: SSCSStudy, rejectedByName: string) {
++    const shipUser = users.find(u => u.id === study.initiatedById);
++    if (!shipUser) return;
++    void notifyShipOfficerEditRejected({
++      vesselName: study.vesselName,
++      rejectedByName,
++      shipEmail: shipUser.email,
++    }).catch(err => console.error("[Edit rejection email failed]", err));
++  }
++
+   function submitStudy() {
+     if (!activeStudy || !currentUser) return;
+     const pct = completionPct(activeStudy);
+@@ -1431,29 +1480,37 @@ export default function App() {
+   }
+ 
+   function requestRevision() {
+-    if (!activeStudy) return;
++    if (!activeStudy || !currentUser) return;
+     syncStudy({ ...activeStudy, status: "draft" }, true);
++    const shipUser = users.find(u => u.id === activeStudy.initiatedById);
++    if (shipUser) {
++      void notifyShipOfficerRevisionRequested({
++        vesselName: activeStudy.vesselName,
++        requestedByName: currentUser.name,
++        shipEmail: shipUser.email,
++      }).catch(err => console.error("[Revision request email failed]", err));
++    }
+     showToast("Revision requested. Study returned to draft.", "info");
+   }
+ 
+   function requestEdit() {
+     if (!activeStudy || !currentUser) return;
+     syncStudy({ ...activeStudy, status: "edit_requested", editRequestedById: currentUser.id, editRequestedByName: currentUser.name, editRequestedAt: new Date().toISOString() }, true);
++    notifyTerminalOfficersOfEditRequest(activeStudy, currentUser);
+     showToast("Edit request sent to Terminal Officer.", "info");
+   }
+ 
+   function approveEditRequest() {
+     if (!activeStudy || !currentUser) return;
+     syncStudy({ ...activeStudy, status: "editing" }, true);
+-    const shipUser = users.find(u => u.id === activeStudy.initiatedById);
+-    if (shipUser)
+-      notifyShipOfficerEditApproved({ vesselName: activeStudy.vesselName, approvedByName: currentUser.name, shipEmail: shipUser.email });
++    notifyShipOfficerOfEditApproval(activeStudy, currentUser.name);
+     showToast("Edit request approved. User may now edit.", "success");
+   }
+ 
+   function rejectEditRequest() {
+-    if (!activeStudy) return;
++    if (!activeStudy || !currentUser) return;
+     syncStudy({ ...activeStudy, status: "approved", editRequestedById: undefined, editRequestedByName: undefined, editRequestedAt: undefined }, true);
++    notifyShipOfficerOfEditRejection(activeStudy, currentUser.name);
+     showToast("Edit request rejected. Study remains locked.", "info");
+   }
+ 
+@@ -1934,6 +1991,9 @@ export default function App() {
+                   const invalidCertificateCount = study
+                     ? getInvalidCertificateCount(study.qualityAssessmentData)
+                     : 0;
++                  const expiringCertificateCount = study?.status === "approved"
++                    ? getExpiringCertificateCount(study.qualityAssessmentData, 90)
++                    : 0;
+                   return (
+                     <div key={v.id}
+                       className={`w-full grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-4 px-5 py-3.5 items-center hover:bg-secondary/60 transition-colors group ${i < display.length - 1 ? "border-b border-border/50" : ""}`}>
+@@ -1949,6 +2009,9 @@ export default function App() {
+                             {invalidCertificateCount > 0 && (
+                               <CertificateInvalidBadge count={invalidCertificateCount} />
+                             )}
++                            {expiringCertificateCount > 0 && (
++                              <CertificateExpiringBadge count={expiringCertificateCount} />
++                            )}
+                           </div>
+                         </div>
+                       </button>
+@@ -2506,11 +2569,11 @@ export default function App() {
+                   {/* Terminal: approve/reject edit request */}
+                   {isTerminal && study.status === "edit_requested" && (
+                     <>
+-                      <button onClick={() => { syncStudy({ ...study, status: "editing" }); showToast("Edit request approved.", "success"); }}
++                      <button onClick={() => { syncStudy({ ...study, status: "editing" }); notifyShipOfficerOfEditApproval(study, currentUser.name); showToast("Edit request approved.", "success"); }}
+                         className="flex items-center gap-2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 font-mono font-semibold text-xs uppercase px-4 py-2 rounded transition-colors">
+                         <CheckCircle2 className="w-3.5 h-3.5" />Approve Edit
+                       </button>
+-                      <button onClick={() => { syncStudy({ ...study, status: "approved", editRequestedById: undefined, editRequestedByName: undefined, editRequestedAt: undefined }); showToast("Edit request rejected.", "info"); }}
++                      <button onClick={() => { syncStudy({ ...study, status: "approved", editRequestedById: undefined, editRequestedByName: undefined, editRequestedAt: undefined }); notifyShipOfficerOfEditRejection(study, currentUser.name); showToast("Edit request rejected.", "info"); }}
+                         className="flex items-center gap-2 bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 font-mono font-semibold text-xs uppercase px-4 py-2 rounded transition-colors">
+                         <XCircle className="w-3.5 h-3.5" />Reject Edit
+                       </button>
+@@ -2525,7 +2588,7 @@ export default function App() {
+                     </button>
+                   )}
+                   {isShip && study.initiatedById === currentUser.id && study.status === "approved" && !study.editRequestedById && !canKickoff && (
+-                    <button onClick={() => { syncStudy({ ...study, status: "edit_requested", editRequestedById: currentUser.id, editRequestedByName: currentUser.name, editRequestedAt: new Date().toISOString() }); showToast("Edit request sent to Terminal Officer.", "info"); }}
++                    <button onClick={() => { syncStudy({ ...study, status: "edit_requested", editRequestedById: currentUser.id, editRequestedByName: currentUser.name, editRequestedAt: new Date().toISOString() }); notifyTerminalOfficersOfEditRequest(study, currentUser); showToast("Edit request sent to Terminal Officer.", "info"); }}
+                       className="flex items-center gap-2 px-4 py-2 rounded border border-orange-500/30 bg-orange-500/8 text-orange-400 hover:bg-orange-500/15 text-xs font-mono font-semibold uppercase transition-colors">
+                       <Edit3 className="w-3.5 h-3.5" />Request to Edit
+                     </button>
+diff --git a/src/app/components/QualityAssessmentSection.tsx b/src/app/components/QualityAssessmentSection.tsx
+index fc547b1..64aca54 100644
+--- a/src/app/components/QualityAssessmentSection.tsx
++++ b/src/app/components/QualityAssessmentSection.tsx
+@@ -162,6 +162,25 @@ export function getInvalidCertificateCount(data: QualityAssessmentData | undefin
+   }).length;
+ }
+ 
++/** Return the number of non-permanent certificates expiring from today through N days ahead. */
++export function getExpiringCertificateCount(data: QualityAssessmentData | undefined, daysAhead = 90): number {
++  if (!data) return 0;
++
++  const today = new Date();
++  today.setHours(0, 0, 0, 0);
++  const limit = new Date(today);
++  limit.setDate(limit.getDate() + daysAhead);
++
++  return (Object.keys(data.certificates) as CertificateKey[]).filter(key => {
++    if (PERMANENT_KEYS.has(key)) return false;
++    const iso = normalizeDateValue(data.certificates[key]?.validDate ?? "");
++    if (!iso) return false;
++    const [year, month, day] = iso.split("-").map(Number);
++    const expiry = new Date(year, month - 1, day);
++    return expiry >= today && expiry <= limit;
++  }).length;
++}
++
+ export function isQualityAssessmentComplete(data: QualityAssessmentData | undefined): boolean {
+   const d = data ?? defaultQualityAssessmentData();
+   const certificateComplete = (Object.keys(d.certificates) as CertificateKey[]).every(key => {
+diff --git a/src/app/emailService.ts b/src/app/emailService.ts
+index 6bf8104..f7b5e89 100644
+--- a/src/app/emailService.ts
++++ b/src/app/emailService.ts
+@@ -145,6 +145,43 @@ export async function notifyShipOfficerEditApproved(opts: {
+   );
+ }
+ 
++export async function notifyShipOfficerRevisionRequested(opts: {
++  vesselName: string;
++  requestedByName: string;
++  shipEmail: string;
++}) {
++  await send(
++    opts.shipEmail,
++    `SSCS Revision Requested — ${opts.vesselName}`,
++    `The Terminal Officer has requested a revision to your submitted SSCS study.\n\nVessel       : ${opts.vesselName}\nRequested by : ${opts.requestedByName}\n\nThe study has been returned to Draft. Please log in, review the Terminal Officer comments, make the required corrections, and submit the study again.`,
++  );
++}
++
++export async function notifyTerminalOfficerEditRequested(opts: {
++  vesselName: string;
++  requesterName: string;
++  requesterEmail: string;
++  terminalEmail: string;
++}) {
++  await send(
++    opts.terminalEmail,
++    `SSCS Edit Request — ${opts.vesselName}`,
++    `A Ship Officer has requested permission to edit an approved SSCS study.\n\nVessel       : ${opts.vesselName}\nRequested by : ${opts.requesterName} (${opts.requesterEmail})\n\nPlease log in to the LMPT2 SSCS system to approve or reject this edit request.`,
++  );
++}
++
++export async function notifyShipOfficerEditRejected(opts: {
++  vesselName: string;
++  rejectedByName: string;
++  shipEmail: string;
++}) {
++  await send(
++    opts.shipEmail,
++    `Edit Request Rejected — ${opts.vesselName}`,
++    `Your request to edit the approved SSCS study has been rejected.\n\nVessel      : ${opts.vesselName}\nRejected by : ${opts.rejectedByName}\n\nThe approved study remains locked. Please contact the Terminal Officer if further clarification is required.`,
++  );
++}
++
+ export async function sendOTPEmail(opts: {
+   toEmail: string;
+   userName: string;
