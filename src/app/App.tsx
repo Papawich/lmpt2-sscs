@@ -384,6 +384,134 @@ function getLatestStudy(studies: SSCSStudy[], vesselId: number) {
     .sort((a, b) => new Date(b.initiatedAt).getTime() - new Date(a.initiatedAt).getTime())[0];
 }
 
+
+function buildApprovalEmailDraft(vessel: Vessel, study: SSCSStudy) {
+  const gi = (id: string) => study.items.find(i => i.id === id)?.value?.trim() ?? "";
+  const vesselName = gi("gi-01") || vessel.name || study.vesselName;
+  const ballastDraftVal = gi("gi-20");
+  const loadedDraftVal = gi("gi-21");
+  const upperDeckVal = gi("gi-18");
+  const manifoldHVal = gi("gi-19");
+  const pn = (value: string) => {
+    const parsed = parseFloat(value);
+    return Number.isNaN(parsed) ? NaN : parsed;
+  };
+
+  const pattern = study.mooringArrangementData?.pattern;
+  const fwdNums = pattern ? [pattern.fwd1, pattern.fwd2, pattern.fwd3, pattern.fwd4].filter(Boolean) : [];
+  const aftNums = pattern ? [pattern.aft1, pattern.aft2, pattern.aft3, pattern.aft4].filter(Boolean) : [];
+  const patternStr = fwdNums.length || aftNums.length
+    ? `FWD ${fwdNums.join("+")} / AFT ${aftNums.join("+")}`
+    : "—";
+
+  const ropeType = study.mooringArrangementData?.mooringRope?.type || "";
+  const tailType = study.mooringArrangementData?.tailRope?.type || "";
+  const ropeStr = ropeType || tailType ? [ropeType, tailType].filter(Boolean).join(" / ") : "—";
+
+  const gangway = study.gangwayData;
+  const gwLen = pn(gangway?.b ?? "") - pn(gangway?.a ?? "");
+  const gwWid = pn(gangway?.d ?? "") - pn(gangway?.c ?? "");
+  const gwHasVals = !!(gangway?.a && gangway?.b && gangway?.c && gangway?.d);
+  const gangwayAreaResult: "ok" | "fail" | null = gwHasVals
+    ? (!Number.isNaN(gwLen) && !Number.isNaN(gwWid) && gwLen > 2.45 && gwWid > 0.60 ? "ok" : "fail")
+    : null;
+
+  const ud = pn(upperDeckVal);
+  const bd = pn(ballastDraftVal);
+  const ld = pn(loadedDraftVal);
+  const gwUp = Number.isNaN(ud) || Number.isNaN(bd) ? NaN : 22.7 - ud + bd - 3.5;
+  const gwLo = Number.isNaN(ud) || Number.isNaN(ld) ? NaN : ud - ld - 12.1;
+  const gangwayRangeResult: "ok" | "fail" | null = !Number.isNaN(gwUp) && !Number.isNaN(gwLo)
+    ? (gwUp > 0 && gwLo > 0 ? "ok" : "fail")
+    : null;
+
+  const mh = pn(manifoldHVal);
+  const uaUp = Number.isNaN(mh) || Number.isNaN(bd) ? NaN : 27.5 - mh + bd - 3.5;
+  const uaLo = Number.isNaN(mh) || Number.isNaN(ld) ? NaN : mh - ld - 17.5;
+  const unloadingArmResult: "ok" | "fail" | null = !Number.isNaN(uaUp) && !Number.isNaN(uaLo)
+    ? (uaUp > 0 && uaLo > 0 ? "ok" : "fail")
+    : null;
+
+  const ctms = study.ctmsData;
+  const ctmsFail: string[] = [];
+  if (ctms) {
+    const primary = pn(ctms.primaryLevel.accuracy);
+    if (!ctms.primaryLevel.accuracy || Number.isNaN(primary) || primary > 7.5) ctmsFail.push("Primary Level Sensor");
+    const secondary = pn(ctms.secondaryLevel.accuracy);
+    if (!ctms.secondaryLevel.accuracy || Number.isNaN(secondary) || secondary > 7.5) ctmsFail.push("Secondary Level Sensor");
+    const t1 = pn(ctms.temperature.accuracyRange1);
+    const t2 = pn(ctms.temperature.accuracyRange2);
+    if (!ctms.temperature.accuracyRange1 || !ctms.temperature.accuracyRange2 || Number.isNaN(t1) || Number.isNaN(t2) || t1 > 0.2 || t2 > 1.5) ctmsFail.push("Temperature Sensor");
+    const pressure = pn(ctms.pressure.accuracy);
+    if (!ctms.pressure.accuracy || Number.isNaN(pressure) || pressure > 1) ctmsFail.push("Pressure Sensor");
+  }
+  const ctmsHasData = !!(ctms && (ctms.primaryLevel.accuracy || ctms.secondaryLevel.accuracy || ctms.temperature.accuracyRange1 || ctms.pressure.accuracy));
+  const ctmsResult: "ok" | "fail" | null = ctmsHasData ? (ctmsFail.length === 0 ? "ok" : "fail") : null;
+  const ctmsLabel = ctmsResult === "ok"
+    ? "All Acceptable"
+    : ctmsResult === "fail"
+      ? `All Acceptable, except ${ctmsFail.join(", ")}`
+      : "—";
+
+  const sdp = study.sdpData;
+  const sdpCheck = (value: string, min: number | null, max: number | null) => {
+    if (!value) return false;
+    const n = pn(value);
+    if (Number.isNaN(n)) return false;
+    if (min !== null && n < min) return false;
+    if (max !== null && n > max) return false;
+    return true;
+  };
+  const sdpHasData = !!(sdp && (sdp.outsideDiameter || sdp.flangeThickness || sdp.raisedFace || sdp.insideDiameter || sdp.surfaceFinishMax));
+  const sdpAllOk = !!(sdpHasData && sdp && [
+    sdpCheck(sdp.outsideDiameter, 595, 598.5),
+    sdpCheck(sdp.flangeThickness, 36.6, 41),
+    sdpCheck(sdp.raisedFace, 460, 470),
+    sdpCheck(sdp.insideDiameter, null, 387),
+    sdpCheck(sdp.surfaceFinishMax, 3.2, 12.5),
+    sdpCheck(sdp.surfaceFinishMin, 3.2, 12.5),
+  ].every(Boolean));
+  const sdpResult: "ok" | "fail" | null = sdpHasData ? (sdpAllOk ? "ok" : "fail") : null;
+
+  const resultText = (result: "ok" | "fail" | null) =>
+    result === "ok" ? "Acceptable" : result === "fail" ? "Unacceptable" : "—";
+
+  const subject = `[SSCS | LMPT2] Approved | the LNG/C ${vesselName}`;
+  const body = [
+    "Dear Sir/Madam,",
+    "",
+    `The Ship Shore Compatibility Study (SSCS) for the LNG/C ${vesselName} has been approved by LMPT2.`,
+    "Please find the approval summary below.",
+    "",
+    "APPROVAL DETAILS",
+    `Study ID: ${study.id}`,
+    `Initiated by: ${study.initiatedByName || "—"}`,
+    `Approved by: ${study.reviewedByName || "—"}`,
+    `Approved date: ${study.approvedAt ? fmtDate(study.approvedAt) : "—"}`,
+    "",
+    "SSCS SUMMARY",
+    `Ship's Name: ${vesselName}`,
+    `1st Gas Management System: ${vessel.gasMgmt1 || "—"}`,
+    `2nd Gas Management System: ${vessel.gasMgmt2 || "—"}`,
+    `Ballast Draft: ${ballastDraftVal ? `${ballastDraftVal} m.` : "—"}`,
+    `Loaded Draft: ${loadedDraftVal ? `${loadedDraftVal} m.` : "—"}`,
+    "Sunken Bitts: To be calculated",
+    `Mooring Pattern: ${patternStr}`,
+    `Mooring / Tail Rope: ${ropeStr}`,
+    `Gangway Area: ${resultText(gangwayAreaResult)}`,
+    `Gangway Working Range: ${resultText(gangwayRangeResult)}`,
+    `Unloading Arm Working Range: ${resultText(unloadingArmResult)}`,
+    `CTMS: ${ctmsLabel}`,
+    `SDPs: ${resultText(sdpResult)}`,
+    "",
+    ...(study.terminalNotes?.trim() ? ["TERMINAL OFFICER NOTES", study.terminalNotes.trim(), ""] : []),
+    "Best regards,",
+    "LMPT2 SSCS",
+  ].join("\r\n");
+
+  return { subject, body };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // METADATA
 // ─────────────────────────────────────────────────────────────────────────────
@@ -680,6 +808,14 @@ export default function App() {
   function showToast(msg: string, type: "success" | "error" | "info" = "success") {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 3000);
+  }
+
+
+  function openApprovalEmailDraft(vessel: Vessel, study: SSCSStudy) {
+    const recipient = users.find(user => user.id === study.initiatedById)?.email?.trim() ?? "";
+    const { subject, body } = buildApprovalEmailDraft(vessel, study);
+    const mailto = `mailto:${encodeURIComponent(recipient)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    window.location.href = mailto;
   }
 
   async function loadCloudData() {
@@ -2349,6 +2485,15 @@ export default function App() {
                     className="flex items-center gap-2 px-4 py-2 rounded border border-border hover:bg-secondary text-xs font-mono text-muted-foreground hover:text-foreground transition-colors">
                     <ClipboardList className="w-3.5 h-3.5" />View Study
                   </button>
+
+
+                  {/* Terminal Officer: open a pre-filled email draft; nothing is sent automatically. */}
+                  {isTerminal && study.status === "approved" && (
+                    <button onClick={() => openApprovalEmailDraft(v, study)}
+                      className="flex items-center gap-2 px-4 py-2 rounded border border-sky-500/30 bg-sky-500/5 hover:bg-sky-500/10 text-xs font-mono text-sky-400 transition-colors">
+                      <Mail className="w-3.5 h-3.5" />Send an Approval
+                    </button>
+                  )}
 
                   {/* Terminal: review submitted */}
                   {isTerminal && study.status === "submitted" && (
