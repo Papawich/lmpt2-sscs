@@ -309,7 +309,7 @@ function FlatBodyTab({
           ) : (
             <span className={readCell + " w-24"}>{data.vapourManifoldOffset || "—"}</span>
           )}
-          <span className="font-mono text-xs text-muted-foreground">m</span>
+          <span className="font-mono text-xs text-muted-foreground">m.</span>
           <span className="font-mono text-[10px] text-muted-foreground ml-3">(unit : m)</span>
         </div>
       </div>
@@ -321,14 +321,14 @@ function FlatBodyTab({
 
       {/* Table */}
       <div>
-        <p className="font-mono text-xs font-bold text-foreground mb-2 underline">Length of Flat Body From Vapour Manifold</p>
+        <p className="font-mono text-xs font-bold text-foreground mb-2 underline">Length of Flat Body From Vapour Manifold (m.)</p>
         <div className="border border-border rounded overflow-hidden">
           <table className="w-full text-xs">
             <thead>
               <tr className="bg-secondary border-b border-border">
                 <th className="px-4 py-2.5 text-left font-mono font-bold text-foreground border-r border-border">Details</th>
-                <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground border-r border-border" colSpan={2}>Fwd Part</th>
-                <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground" colSpan={2}>Aft Part</th>
+                <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground border-r border-border" colSpan={2}>Fwd Part (m.)</th>
+                <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground" colSpan={2}>Aft Part (m.)</th>
               </tr>
             </thead>
             <tbody>
@@ -338,32 +338,38 @@ function FlatBodyTab({
                   {/* Fwd number */}
                   <td className="px-3 py-2 text-center italic font-bold text-[#1e3a8a] border-r border-border/40 w-8">{row.num1}</td>
                   {/* Fwd input */}
-                  <td className="px-2 py-1.5 border-r border-border w-28">
-                    {canEdit ? (
-                      <input
-                        type="text"
-                        value={data[row.fwdKey] ?? ""}
-                        onChange={e => set(row.fwdKey, e.target.value)}
-                        className={yellowInput}
-                      />
-                    ) : (
-                      <span className={readCell}>{data[row.fwdKey] || "—"}</span>
-                    )}
+                  <td className="px-2 py-1.5 border-r border-border w-36">
+                    <div className="flex items-center gap-1.5">
+                      {canEdit ? (
+                        <input
+                          type="text"
+                          value={data[row.fwdKey] ?? ""}
+                          onChange={e => set(row.fwdKey, e.target.value)}
+                          className={yellowInput + " min-w-0 flex-1"}
+                        />
+                      ) : (
+                        <span className={readCell + " min-w-0 flex-1"}>{data[row.fwdKey] || "—"}</span>
+                      )}
+                      <span className="font-mono text-[10px] text-muted-foreground shrink-0">m.</span>
+                    </div>
                   </td>
                   {/* Aft number */}
                   <td className="px-3 py-2 text-center italic font-bold text-[#1e3a8a] border-r border-border/40 w-8">{row.num2}</td>
                   {/* Aft input */}
-                  <td className="px-2 py-1.5 w-28">
-                    {canEdit ? (
-                      <input
-                        type="text"
-                        value={data[row.aftKey] ?? ""}
-                        onChange={e => set(row.aftKey, e.target.value)}
-                        className={yellowInput}
-                      />
-                    ) : (
-                      <span className={readCell}>{data[row.aftKey] || "—"}</span>
-                    )}
+                  <td className="px-2 py-1.5 w-36">
+                    <div className="flex items-center gap-1.5">
+                      {canEdit ? (
+                        <input
+                          type="text"
+                          value={data[row.aftKey] ?? ""}
+                          onChange={e => set(row.aftKey, e.target.value)}
+                          className={yellowInput + " min-w-0 flex-1"}
+                        />
+                      ) : (
+                        <span className={readCell + " min-w-0 flex-1"}>{data[row.aftKey] || "—"}</span>
+                      )}
+                      <span className="font-mono text-[10px] text-muted-foreground shrink-0">m.</span>
+                    </div>
                   </td>
                 </tr>
               ))}

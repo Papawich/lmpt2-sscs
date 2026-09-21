@@ -388,6 +388,38 @@ function getLatestStudy(studies: SSCSStudy[], vesselId: number) {
     .sort((a, b) => new Date(b.initiatedAt).getTime() - new Date(a.initiatedAt).getTime())[0];
 }
 
+function vesselWithSubmittedGeneralInfo(vessel: Vessel, study?: SSCSStudy): Vessel {
+  // Main/Search must show the latest submitted information, not unfinished edits.
+  // Draft/editing values stay inside the study until the user submits again.
+  const publishedStatuses: StudyStatus[] = ["submitted", "approved", "edit_requested"];
+  if (!study?.submittedAt || !publishedStatuses.includes(study.status)) return vessel;
+
+  const gi = (id: string) => study.items.find(item => item.id === id)?.value?.trim() ?? "";
+  const yearRaw = gi("gi-06");
+  const parsedYear = Number.parseInt(yearRaw, 10);
+  const capacityRaw = gi("gi-10");
+  const capacity = capacityRaw
+    ? `${capacityRaw}${/m³|m3/i.test(capacityRaw) ? "" : " m³"}`
+    : vessel.capacity;
+
+  return {
+    ...vessel,
+    name: gi("gi-01") || vessel.name,
+    imo: gi("gi-02") || vessel.imo,
+    callSign: gi("gi-03") || vessel.callSign,
+    flag: gi("gi-04") || vessel.flag,
+    portOfRegistry: gi("gi-05") || vessel.portOfRegistry,
+    year: Number.isFinite(parsedYear) ? parsedYear : vessel.year,
+    owner: gi("gi-07") || vessel.owner,
+    operator: gi("gi-08") || vessel.operator,
+    type: gi("gi-09") || vessel.type,
+    capacity,
+    classification: gi("gi-11") || vessel.classification,
+    gasMgmt1: gi("gi-12") || vessel.gasMgmt1,
+    gasMgmt2: gi("gi-13") || vessel.gasMgmt2,
+  };
+}
+
 
 function buildApprovalEmailDraft(vessel: Vessel, study: SSCSStudy) {
   const gi = (id: string) => study.items.find(i => i.id === id)?.value?.trim() ?? "";
@@ -913,10 +945,13 @@ export default function App() {
 
   useEffect(() => {
     const q = searchQuery.trim().toLowerCase();
+    const latestVessels = vessels.map(v =>
+      vesselWithSubmittedGeneralInfo(v, getLatestStudy(studies, v.id))
+    );
     setSearchResults(q.length >= 1
-      ? vessels.filter(v => [v.name, v.type, v.flag, v.imo, v.callSign, v.operator, v.owner, v.classification, v.portOfRegistry].some(f => (f || "").toLowerCase().includes(q))).slice(0, 8)
+      ? latestVessels.filter(v => [v.name, v.type, v.flag, v.imo, v.callSign, v.operator, v.owner, v.classification, v.portOfRegistry].some(f => (f || "").toLowerCase().includes(q))).slice(0, 8)
       : []);
-  }, [searchQuery, vessels]);
+  }, [searchQuery, vessels, studies]);
 
   useEffect(() => {
     function outside(e: MouseEvent) { if (searchRef.current && !searchRef.current.contains(e.target as Node)) setSearchFocused(false); }
@@ -1462,11 +1497,24 @@ export default function App() {
     if (!activeStudy || !currentUser) return;
     const pct = completionPct(activeStudy);
     if (pct < 100) { showToast("Please complete all checklist items before submitting.", "error"); return; }
-    syncStudy({ ...activeStudy, status: "submitted", submittedAt: new Date().toISOString() }, true);
+
+    const latestName = activeStudy.items.find(item => item.id === "gi-01")?.value?.trim() || activeStudy.vesselName;
+    const submittedStudy: SSCSStudy = {
+      ...activeStudy,
+      vesselName: latestName,
+      status: "submitted",
+      submittedAt: new Date().toISOString(),
+    };
+
+    syncStudy(submittedStudy, true);
+    // Reflect the submitted General Information on the main vessel list immediately.
+    setVessels(prev => prev.map(v =>
+      v.id === submittedStudy.vesselId ? vesselWithSubmittedGeneralInfo(v, submittedStudy) : v
+    ));
     showToast("Study submitted to Terminal Officer for review.", "success");
     // Notify all terminal officers
     users.filter(u => u.role === "terminal_officer").forEach(u =>
-      notifyTerminalOfficerStudySubmitted({ vesselName: activeStudy.vesselName, submitterName: currentUser.name, terminalEmail: u.email })
+      notifyTerminalOfficerStudySubmitted({ vesselName: submittedStudy.vesselName, submitterName: currentUser.name, terminalEmail: u.email })
     );
   }
 
@@ -1988,6 +2036,7 @@ export default function App() {
                 </div>
                 {display.map((v, i) => {
                   const study = getLatestStudy(studies, v.id);
+                  const mainVessel = vesselWithSubmittedGeneralInfo(v, study);
                   const invalidCertificateCount = study
                     ? getInvalidCertificateCount(study.qualityAssessmentData)
                     : 0;
@@ -1997,14 +2046,14 @@ export default function App() {
                   return (
                     <div key={v.id}
                       className={`w-full grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-4 px-5 py-3.5 items-center hover:bg-secondary/60 transition-colors group ${i < display.length - 1 ? "border-b border-border/50" : ""}`}>
-                      <button className="flex items-center gap-3 min-w-0 text-left" onClick={() => { setSelectedVessel(v); setPage("vessel"); }}>
+                      <button className="flex items-center gap-3 min-w-0 text-left" onClick={() => { setSelectedVessel(mainVessel); setPage("vessel"); }}>
                         <div className="w-7 h-7 rounded bg-primary/8 border border-primary/15 flex items-center justify-center shrink-0 group-hover:border-primary/30 transition-colors">
                           <Ship className="w-3.5 h-3.5 text-primary/60 group-hover:text-primary transition-colors" />
                         </div>
                         <div className="min-w-0">
-                          <p className="text-sm text-foreground font-medium truncate group-hover:text-primary transition-colors">{v.name}</p>
+                          <p className="text-sm text-foreground font-medium truncate group-hover:text-primary transition-colors">{mainVessel.name}</p>
                           <div className="flex items-center gap-2 flex-wrap">
-                            <p className="font-mono text-[10px] text-muted-foreground">{v.imo}</p>
+                            <p className="font-mono text-[10px] text-muted-foreground">{mainVessel.imo}</p>
                             {study && <StudyBadge status={study.status} />}
                             {invalidCertificateCount > 0 && (
                               <CertificateInvalidBadge count={invalidCertificateCount} />
@@ -2015,9 +2064,9 @@ export default function App() {
                           </div>
                         </div>
                       </button>
-                      <span className="hidden md:block font-mono text-xs text-muted-foreground whitespace-nowrap">{v.type}</span>
-                      <span className="hidden sm:block font-mono text-xs text-foreground whitespace-nowrap">{v.capacity}</span>
-                      <span className="hidden lg:block text-xs text-muted-foreground whitespace-nowrap">{v.flag} · {v.year}</span>
+                      <span className="hidden md:block font-mono text-xs text-muted-foreground whitespace-nowrap">{mainVessel.type}</span>
+                      <span className="hidden sm:block font-mono text-xs text-foreground whitespace-nowrap">{mainVessel.capacity}</span>
+                      <span className="hidden lg:block text-xs text-muted-foreground whitespace-nowrap">{mainVessel.flag} · {mainVessel.year}</span>
                       <VesselBadge status={v.status} />
                       <button
                         title="SSCS Summary"

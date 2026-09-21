@@ -1,0 +1,369 @@
+--- a/src/app/App.tsx
++++ b/src/app/App.tsx
+@@ -388,6 +388,38 @@
+     .sort((a, b) => new Date(b.initiatedAt).getTime() - new Date(a.initiatedAt).getTime())[0];
+ }
+ 
++function vesselWithSubmittedGeneralInfo(vessel: Vessel, study?: SSCSStudy): Vessel {
++  // Main/Search must show the latest submitted information, not unfinished edits.
++  // Draft/editing values stay inside the study until the user submits again.
++  const publishedStatuses: StudyStatus[] = ["submitted", "approved", "edit_requested"];
++  if (!study?.submittedAt || !publishedStatuses.includes(study.status)) return vessel;
++
++  const gi = (id: string) => study.items.find(item => item.id === id)?.value?.trim() ?? "";
++  const yearRaw = gi("gi-06");
++  const parsedYear = Number.parseInt(yearRaw, 10);
++  const capacityRaw = gi("gi-10");
++  const capacity = capacityRaw
++    ? `${capacityRaw}${/m³|m3/i.test(capacityRaw) ? "" : " m³"}`
++    : vessel.capacity;
++
++  return {
++    ...vessel,
++    name: gi("gi-01") || vessel.name,
++    imo: gi("gi-02") || vessel.imo,
++    callSign: gi("gi-03") || vessel.callSign,
++    flag: gi("gi-04") || vessel.flag,
++    portOfRegistry: gi("gi-05") || vessel.portOfRegistry,
++    year: Number.isFinite(parsedYear) ? parsedYear : vessel.year,
++    owner: gi("gi-07") || vessel.owner,
++    operator: gi("gi-08") || vessel.operator,
++    type: gi("gi-09") || vessel.type,
++    capacity,
++    classification: gi("gi-11") || vessel.classification,
++    gasMgmt1: gi("gi-12") || vessel.gasMgmt1,
++    gasMgmt2: gi("gi-13") || vessel.gasMgmt2,
++  };
++}
++
+ 
+ function buildApprovalEmailDraft(vessel: Vessel, study: SSCSStudy) {
+   const gi = (id: string) => study.items.find(i => i.id === id)?.value?.trim() ?? "";
+@@ -913,10 +945,13 @@
+ 
+   useEffect(() => {
+     const q = searchQuery.trim().toLowerCase();
++    const latestVessels = vessels.map(v =>
++      vesselWithSubmittedGeneralInfo(v, getLatestStudy(studies, v.id))
++    );
+     setSearchResults(q.length >= 1
+-      ? vessels.filter(v => [v.name, v.type, v.flag, v.imo, v.callSign, v.operator, v.owner, v.classification, v.portOfRegistry].some(f => (f || "").toLowerCase().includes(q))).slice(0, 8)
++      ? latestVessels.filter(v => [v.name, v.type, v.flag, v.imo, v.callSign, v.operator, v.owner, v.classification, v.portOfRegistry].some(f => (f || "").toLowerCase().includes(q))).slice(0, 8)
+       : []);
+-  }, [searchQuery, vessels]);
++  }, [searchQuery, vessels, studies]);
+ 
+   useEffect(() => {
+     function outside(e: MouseEvent) { if (searchRef.current && !searchRef.current.contains(e.target as Node)) setSearchFocused(false); }
+@@ -1462,11 +1497,24 @@
+     if (!activeStudy || !currentUser) return;
+     const pct = completionPct(activeStudy);
+     if (pct < 100) { showToast("Please complete all checklist items before submitting.", "error"); return; }
+-    syncStudy({ ...activeStudy, status: "submitted", submittedAt: new Date().toISOString() }, true);
++
++    const latestName = activeStudy.items.find(item => item.id === "gi-01")?.value?.trim() || activeStudy.vesselName;
++    const submittedStudy: SSCSStudy = {
++      ...activeStudy,
++      vesselName: latestName,
++      status: "submitted",
++      submittedAt: new Date().toISOString(),
++    };
++
++    syncStudy(submittedStudy, true);
++    // Reflect the submitted General Information on the main vessel list immediately.
++    setVessels(prev => prev.map(v =>
++      v.id === submittedStudy.vesselId ? vesselWithSubmittedGeneralInfo(v, submittedStudy) : v
++    ));
+     showToast("Study submitted to Terminal Officer for review.", "success");
+     // Notify all terminal officers
+     users.filter(u => u.role === "terminal_officer").forEach(u =>
+-      notifyTerminalOfficerStudySubmitted({ vesselName: activeStudy.vesselName, submitterName: currentUser.name, terminalEmail: u.email })
++      notifyTerminalOfficerStudySubmitted({ vesselName: submittedStudy.vesselName, submitterName: currentUser.name, terminalEmail: u.email })
+     );
+   }
+ 
+@@ -1988,6 +2036,7 @@
+                 </div>
+                 {display.map((v, i) => {
+                   const study = getLatestStudy(studies, v.id);
++                  const mainVessel = vesselWithSubmittedGeneralInfo(v, study);
+                   const invalidCertificateCount = study
+                     ? getInvalidCertificateCount(study.qualityAssessmentData)
+                     : 0;
+@@ -1997,14 +2046,14 @@
+                   return (
+                     <div key={v.id}
+                       className={`w-full grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-4 px-5 py-3.5 items-center hover:bg-secondary/60 transition-colors group ${i < display.length - 1 ? "border-b border-border/50" : ""}`}>
+-                      <button className="flex items-center gap-3 min-w-0 text-left" onClick={() => { setSelectedVessel(v); setPage("vessel"); }}>
++                      <button className="flex items-center gap-3 min-w-0 text-left" onClick={() => { setSelectedVessel(mainVessel); setPage("vessel"); }}>
+                         <div className="w-7 h-7 rounded bg-primary/8 border border-primary/15 flex items-center justify-center shrink-0 group-hover:border-primary/30 transition-colors">
+                           <Ship className="w-3.5 h-3.5 text-primary/60 group-hover:text-primary transition-colors" />
+                         </div>
+                         <div className="min-w-0">
+-                          <p className="text-sm text-foreground font-medium truncate group-hover:text-primary transition-colors">{v.name}</p>
++                          <p className="text-sm text-foreground font-medium truncate group-hover:text-primary transition-colors">{mainVessel.name}</p>
+                           <div className="flex items-center gap-2 flex-wrap">
+-                            <p className="font-mono text-[10px] text-muted-foreground">{v.imo}</p>
++                            <p className="font-mono text-[10px] text-muted-foreground">{mainVessel.imo}</p>
+                             {study && <StudyBadge status={study.status} />}
+                             {invalidCertificateCount > 0 && (
+                               <CertificateInvalidBadge count={invalidCertificateCount} />
+@@ -2015,9 +2064,9 @@
+                           </div>
+                         </div>
+                       </button>
+-                      <span className="hidden md:block font-mono text-xs text-muted-foreground whitespace-nowrap">{v.type}</span>
+-                      <span className="hidden sm:block font-mono text-xs text-foreground whitespace-nowrap">{v.capacity}</span>
+-                      <span className="hidden lg:block text-xs text-muted-foreground whitespace-nowrap">{v.flag} · {v.year}</span>
++                      <span className="hidden md:block font-mono text-xs text-muted-foreground whitespace-nowrap">{mainVessel.type}</span>
++                      <span className="hidden sm:block font-mono text-xs text-foreground whitespace-nowrap">{mainVessel.capacity}</span>
++                      <span className="hidden lg:block text-xs text-muted-foreground whitespace-nowrap">{mainVessel.flag} · {mainVessel.year}</span>
+                       <VesselBadge status={v.status} />
+                       <button
+                         title="SSCS Summary"
+--- a/src/app/components/FenderFlatBodySection.tsx
++++ b/src/app/components/FenderFlatBodySection.tsx
+@@ -309,7 +309,7 @@
+           ) : (
+             <span className={readCell + " w-24"}>{data.vapourManifoldOffset || "—"}</span>
+           )}
+-          <span className="font-mono text-xs text-muted-foreground">m</span>
++          <span className="font-mono text-xs text-muted-foreground">m.</span>
+           <span className="font-mono text-[10px] text-muted-foreground ml-3">(unit : m)</span>
+         </div>
+       </div>
+@@ -321,14 +321,14 @@
+ 
+       {/* Table */}
+       <div>
+-        <p className="font-mono text-xs font-bold text-foreground mb-2 underline">Length of Flat Body From Vapour Manifold</p>
++        <p className="font-mono text-xs font-bold text-foreground mb-2 underline">Length of Flat Body From Vapour Manifold (m.)</p>
+         <div className="border border-border rounded overflow-hidden">
+           <table className="w-full text-xs">
+             <thead>
+               <tr className="bg-secondary border-b border-border">
+                 <th className="px-4 py-2.5 text-left font-mono font-bold text-foreground border-r border-border">Details</th>
+-                <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground border-r border-border" colSpan={2}>Fwd Part</th>
+-                <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground" colSpan={2}>Aft Part</th>
++                <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground border-r border-border" colSpan={2}>Fwd Part (m.)</th>
++                <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground" colSpan={2}>Aft Part (m.)</th>
+               </tr>
+             </thead>
+             <tbody>
+@@ -338,32 +338,38 @@
+                   {/* Fwd number */}
+                   <td className="px-3 py-2 text-center italic font-bold text-[#1e3a8a] border-r border-border/40 w-8">{row.num1}</td>
+                   {/* Fwd input */}
+-                  <td className="px-2 py-1.5 border-r border-border w-28">
+-                    {canEdit ? (
+-                      <input
+-                        type="text"
+-                        value={data[row.fwdKey] ?? ""}
+-                        onChange={e => set(row.fwdKey, e.target.value)}
+-                        className={yellowInput}
+-                      />
+-                    ) : (
+-                      <span className={readCell}>{data[row.fwdKey] || "—"}</span>
+-                    )}
++                  <td className="px-2 py-1.5 border-r border-border w-36">
++                    <div className="flex items-center gap-1.5">
++                      {canEdit ? (
++                        <input
++                          type="text"
++                          value={data[row.fwdKey] ?? ""}
++                          onChange={e => set(row.fwdKey, e.target.value)}
++                          className={yellowInput + " min-w-0 flex-1"}
++                        />
++                      ) : (
++                        <span className={readCell + " min-w-0 flex-1"}>{data[row.fwdKey] || "—"}</span>
++                      )}
++                      <span className="font-mono text-[10px] text-muted-foreground shrink-0">m.</span>
++                    </div>
+                   </td>
+                   {/* Aft number */}
+                   <td className="px-3 py-2 text-center italic font-bold text-[#1e3a8a] border-r border-border/40 w-8">{row.num2}</td>
+                   {/* Aft input */}
+-                  <td className="px-2 py-1.5 w-28">
+-                    {canEdit ? (
+-                      <input
+-                        type="text"
+-                        value={data[row.aftKey] ?? ""}
+-                        onChange={e => set(row.aftKey, e.target.value)}
+-                        className={yellowInput}
+-                      />
+-                    ) : (
+-                      <span className={readCell}>{data[row.aftKey] || "—"}</span>
+-                    )}
++                  <td className="px-2 py-1.5 w-36">
++                    <div className="flex items-center gap-1.5">
++                      {canEdit ? (
++                        <input
++                          type="text"
++                          value={data[row.aftKey] ?? ""}
++                          onChange={e => set(row.aftKey, e.target.value)}
++                          className={yellowInput + " min-w-0 flex-1"}
++                        />
++                      ) : (
++                        <span className={readCell + " min-w-0 flex-1"}>{data[row.aftKey] || "—"}</span>
++                      )}
++                      <span className="font-mono text-[10px] text-muted-foreground shrink-0">m.</span>
++                    </div>
+                   </td>
+                 </tr>
+               ))}
+--- a/src/app/components/CargoManagementSection.tsx
++++ b/src/app/components/CargoManagementSection.tsx
+@@ -145,7 +145,12 @@
+   return (
+     <tr className="border-b border-border last:border-0">
+       <td className="px-4 py-2.5 font-mono font-bold text-xs text-foreground border-r border-border whitespace-nowrap">{label}</td>
+-      <td className="px-3 py-1.5 border-r border-border">{renderInput("capacity")}</td>
++      <td className="px-3 py-1.5 border-r border-border">
++        <div className="flex items-center gap-1.5">
++          <div className="min-w-0 flex-1">{renderInput("capacity")}</div>
++          <span className="font-mono text-[10px] text-muted-foreground shrink-0">kg/h</span>
++        </div>
++      </td>
+       <td className="px-3 py-1.5 border-r border-border">{renderInput("timeStart")}</td>
+       <td className="px-3 py-1.5">{renderInput("timeStop")}</td>
+     </tr>
+@@ -280,7 +285,7 @@
+               <thead>
+                 <tr className="bg-secondary/30 border-b border-border">
+                   <th className="px-4 py-2.5 text-left font-mono font-bold text-foreground border-r border-border w-44">System</th>
+-                  <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground border-r border-border">Capacity</th>
++                  <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground border-r border-border">Capacity<br /><span className="font-normal text-[9px] text-muted-foreground">(kg/h)</span></th>
+                   <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground border-r border-border">Time to Start<br /><span className="font-normal text-[9px] text-muted-foreground">(min)</span></th>
+                   <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground">Time to Stop<br /><span className="font-normal text-[9px] text-muted-foreground">(min)</span></th>
+                 </tr>
+@@ -310,7 +315,7 @@
+               </tbody>
+             </table>
+           </div>
+-          <p className="font-mono text-[10px] text-muted-foreground mt-3 px-1">Capacity in appropriate units · Start/Stop times in minutes</p>
++          <p className="font-mono text-[10px] text-muted-foreground mt-3 px-1">Capacity in kg/h · Start/Stop times in minutes</p>
+         </div>
+       )}
+ 
+--- /dev/null
++++ b/supabase/005_sync_vessel_master_on_submit.sql
+@@ -0,0 +1,119 @@
++-- Keep public.vessels synchronized with the latest submitted SSCS General Information.
++-- This updates only vessel-master fields mapped from gi-01..gi-13.
++
++create or replace function public.sync_vessel_master_from_study(target_study_id text)
++returns void
++language plpgsql
++security definer
++set search_path = public, pg_temp
++as $$
++declare
++  s public.sscs_studies%rowtype;
++  gi01 text; gi02 text; gi03 text; gi04 text; gi05 text; gi06 text; gi07 text;
++  gi08 text; gi09 text; gi10 text; gi11 text; gi12 text; gi13 text;
++begin
++  select * into s
++  from public.sscs_studies
++  where id = target_study_id;
++
++  if not found or s.submitted_at is null then
++    return;
++  end if;
++
++  select
++    max(value) filter (where item_id = 'gi-01'),
++    max(value) filter (where item_id = 'gi-02'),
++    max(value) filter (where item_id = 'gi-03'),
++    max(value) filter (where item_id = 'gi-04'),
++    max(value) filter (where item_id = 'gi-05'),
++    max(value) filter (where item_id = 'gi-06'),
++    max(value) filter (where item_id = 'gi-07'),
++    max(value) filter (where item_id = 'gi-08'),
++    max(value) filter (where item_id = 'gi-09'),
++    max(value) filter (where item_id = 'gi-10'),
++    max(value) filter (where item_id = 'gi-11'),
++    max(value) filter (where item_id = 'gi-12'),
++    max(value) filter (where item_id = 'gi-13')
++  into gi01, gi02, gi03, gi04, gi05, gi06, gi07, gi08, gi09, gi10, gi11, gi12, gi13
++  from (
++    select
++      elem->>'id' as item_id,
++      nullif(btrim(coalesce(elem->>'value', '')), '') as value
++    from jsonb_array_elements(coalesce(s.items, '[]'::jsonb)) elem
++  ) x;
++
++  update public.vessels v
++  set
++    name = coalesce(gi01, v.name),
++    imo = coalesce(gi02, v.imo),
++    call_sign = coalesce(gi03, v.call_sign),
++    flag = coalesce(gi04, v.flag),
++    port_of_registry = coalesce(gi05, v.port_of_registry),
++    year_built = case
++      when gi06 ~ '^\d{4}$' then gi06::integer
++      else v.year_built
++    end,
++    owner = coalesce(gi07, v.owner),
++    operator = coalesce(gi08, v.operator),
++    vessel_type = coalesce(gi09, v.vessel_type),
++    capacity = case
++      when gi10 is null then v.capacity
++      when gi10 ~* '(m³|m3)' then gi10
++      else gi10 || ' m³'
++    end,
++    classification = coalesce(gi11, v.classification),
++    gas_mgmt_1 = coalesce(gi12, v.gas_mgmt_1),
++    gas_mgmt_2 = coalesce(gi13, v.gas_mgmt_2),
++    updated_at = now()
++  where v.id = s.vessel_id;
++
++  if gi01 is not null and gi01 is distinct from s.vessel_name then
++    update public.sscs_studies
++    set vessel_name = gi01,
++        updated_at = now()
++    where id = s.id;
++  end if;
++end;
++$$;
++
++revoke all on function public.sync_vessel_master_from_study(text) from public;
++
++create or replace function public.sync_vessel_master_after_submit()
++returns trigger
++language plpgsql
++security definer
++set search_path = public, pg_temp
++as $$
++begin
++  if new.status = 'submitted'
++     and old.status is distinct from new.status then
++    perform public.sync_vessel_master_from_study(new.id);
++  end if;
++  return new;
++end;
++$$;
++
++revoke all on function public.sync_vessel_master_after_submit() from public;
++
++drop trigger if exists trg_sync_vessel_master_after_submit on public.sscs_studies;
++create trigger trg_sync_vessel_master_after_submit
++after update of status on public.sscs_studies
++for each row
++execute function public.sync_vessel_master_after_submit();
++
++-- One-time backfill: align existing vessel master rows with the most recently
++-- submitted study for each vessel so current mismatches are corrected now.
++do $$
++declare
++  r record;
++begin
++  for r in
++    select distinct on (vessel_id) id
++    from public.sscs_studies
++    where submitted_at is not null
++    order by vessel_id, submitted_at desc, initiated_at desc
++  loop
++    perform public.sync_vessel_master_from_study(r.id);
++  end loop;
++end;
++$$;

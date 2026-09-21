@@ -145,7 +145,12 @@ function GasRow({ label, fieldKey, entry, canEdit, onFieldChange }: GasRowProps)
   return (
     <tr className="border-b border-border last:border-0">
       <td className="px-4 py-2.5 font-mono font-bold text-xs text-foreground border-r border-border whitespace-nowrap">{label}</td>
-      <td className="px-3 py-1.5 border-r border-border">{renderInput("capacity")}</td>
+      <td className="px-3 py-1.5 border-r border-border">
+        <div className="flex items-center gap-1.5">
+          <div className="min-w-0 flex-1">{renderInput("capacity")}</div>
+          <span className="font-mono text-[10px] text-muted-foreground shrink-0">kg/h</span>
+        </div>
+      </td>
       <td className="px-3 py-1.5 border-r border-border">{renderInput("timeStart")}</td>
       <td className="px-3 py-1.5">{renderInput("timeStop")}</td>
     </tr>
@@ -280,7 +285,7 @@ export function CargoManagementSection({ canEdit, data: dataProp, onChange }: Pr
               <thead>
                 <tr className="bg-secondary/30 border-b border-border">
                   <th className="px-4 py-2.5 text-left font-mono font-bold text-foreground border-r border-border w-44">System</th>
-                  <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground border-r border-border">Capacity</th>
+                  <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground border-r border-border">Capacity<br /><span className="font-normal text-[9px] text-muted-foreground">(kg/h)</span></th>
                   <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground border-r border-border">Time to Start<br /><span className="font-normal text-[9px] text-muted-foreground">(min)</span></th>
                   <th className="px-4 py-2.5 text-center font-mono font-bold text-foreground">Time to Stop<br /><span className="font-normal text-[9px] text-muted-foreground">(min)</span></th>
                 </tr>
@@ -310,7 +315,7 @@ export function CargoManagementSection({ canEdit, data: dataProp, onChange }: Pr
               </tbody>
             </table>
           </div>
-          <p className="font-mono text-[10px] text-muted-foreground mt-3 px-1">Capacity in appropriate units · Start/Stop times in minutes</p>
+          <p className="font-mono text-[10px] text-muted-foreground mt-3 px-1">Capacity in kg/h · Start/Stop times in minutes</p>
         </div>
       )}
 
