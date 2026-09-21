@@ -40,6 +40,7 @@ const SECTION_KEYS = [
   ["utility", "utilityData"],
   ["required_documents", "requiredDocuments"],
   ["attachments", "attachmentData"],
+  ["quality_assessment", "qualityAssessmentData"],
 ] as const;
 
 function profileFromRow(row: any): CloudProfile {

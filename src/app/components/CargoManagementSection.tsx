@@ -94,6 +94,64 @@ export function isCargoManagementComplete(data: CargoManagementData | undefined)
 const yi = "w-full bg-yellow-100 border border-yellow-400 rounded px-2 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:border-yellow-500 focus:ring-1 focus:ring-yellow-400 transition-all font-mono";
 const ro = "font-mono text-xs text-foreground";
 
+// ─── Stable input components ─────────────────────────────────────────────────
+// Keep these component types outside CargoManagementSection. If they are declared
+// inside the parent component, React sees a new component type on every keystroke
+// and remounts the <input>, which drops focus after a single character.
+interface InputFieldProps {
+  canEdit: boolean;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}
+
+function NumberField({ canEdit, value, onChange, placeholder = "—" }: InputFieldProps) {
+  return canEdit
+    ? <input type="number" value={value ?? ""} onChange={e => onChange(e.target.value)} placeholder={placeholder} step="0.01" className={yi} />
+    : <span className={ro}>{value || "—"}</span>;
+}
+
+function TextField({ canEdit, value, onChange, placeholder = "—" }: InputFieldProps) {
+  return canEdit
+    ? <input type="text" value={value ?? ""} onChange={e => onChange(e.target.value)} placeholder={placeholder} className={yi} />
+    : <span className={ro}>{value || "—"}</span>;
+}
+
+interface GasRowProps {
+  label: string;
+  fieldKey: keyof GasManagementData;
+  entry: GasSystemEntry;
+  canEdit: boolean;
+  onFieldChange: (key: keyof GasManagementData, field: keyof GasSystemEntry, value: string) => void;
+}
+
+function GasRow({ label, fieldKey, entry, canEdit, onFieldChange }: GasRowProps) {
+  const renderInput = (field: keyof GasSystemEntry) => {
+    const value = entry?.[field] ?? "";
+    return canEdit ? (
+      <input
+        type="text"
+        value={value}
+        onChange={e => onFieldChange(fieldKey, field, e.target.value)}
+        placeholder="—"
+        autoComplete="off"
+        className={yi}
+      />
+    ) : (
+      <span className={ro}>{value || "—"}</span>
+    );
+  };
+
+  return (
+    <tr className="border-b border-border last:border-0">
+      <td className="px-4 py-2.5 font-mono font-bold text-xs text-foreground border-r border-border whitespace-nowrap">{label}</td>
+      <td className="px-3 py-1.5 border-r border-border">{renderInput("capacity")}</td>
+      <td className="px-3 py-1.5 border-r border-border">{renderInput("timeStart")}</td>
+      <td className="px-3 py-1.5">{renderInput("timeStop")}</td>
+    </tr>
+  );
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 type SubTab = "cargo_pump" | "gas_management";
@@ -132,16 +190,6 @@ export function CargoManagementSection({ canEdit, data: dataProp, onChange }: Pr
     { key: "cargo_pump",      label: "Cargo Pump / Compressor", complete: pumpComplete },
     { key: "gas_management",  label: "Gas Management System",   complete: gasComplete  },
   ];
-
-  const Field = ({ value, onChange: onCh, placeholder = "—" }: { value: string; onChange: (v: string) => void; placeholder?: string }) =>
-    canEdit
-      ? <input type="number" value={value ?? ""} onChange={e => onCh(e.target.value)} placeholder={placeholder} step="0.01" className={yi} />
-      : <span className={ro}>{value || "—"}</span>;
-
-  const TextField = ({ value, onChange: onCh }: { value: string; onChange: (v: string) => void }) =>
-    canEdit
-      ? <input type="text" value={value ?? ""} onChange={e => onCh(e.target.value)} placeholder="—" className={yi} />
-      : <span className={ro}>{value || "—"}</span>;
 
   return (
     <div className="border border-border rounded bg-card overflow-hidden mb-6">
@@ -184,8 +232,8 @@ export function CargoManagementSection({ canEdit, data: dataProp, onChange }: Pr
                 {/* Cargo Pump */}
                 <tr className="border-b border-border">
                   <td className="px-4 py-2.5 font-mono font-bold text-xs text-foreground border-r border-border whitespace-nowrap">Cargo Pump</td>
-                  <td className="px-3 py-1.5 border-r border-border"><Field value={cp.cargoPump.fillRate} onChange={v => setPump("cargoPump", "fillRate", v)} /></td>
-                  <td className="px-3 py-1.5 border-r border-border"><Field value={cp.cargoPump.totalPumps} onChange={v => setPump("cargoPump", "totalPumps", v)} /></td>
+                  <td className="px-3 py-1.5 border-r border-border"><TextField canEdit={canEdit} value={cp.cargoPump.fillRate} onChange={v => setPump("cargoPump", "fillRate", v)} /></td>
+                  <td className="px-3 py-1.5 border-r border-border"><NumberField canEdit={canEdit} value={cp.cargoPump.totalPumps} onChange={v => setPump("cargoPump", "totalPumps", v)} /></td>
                   <td className="px-3 py-1.5 border-r border-border text-center"><span className="font-mono text-xs text-muted-foreground">—</span></td>
                   <td className="px-3 py-1.5 border-r border-border text-center"><span className="font-mono text-xs text-muted-foreground">—</span></td>
                   <td className="px-3 py-1.5 text-center"><span className="font-mono text-xs text-muted-foreground">—</span></td>
@@ -193,8 +241,8 @@ export function CargoManagementSection({ canEdit, data: dataProp, onChange }: Pr
                 {/* Spray Pump */}
                 <tr className="border-b border-border">
                   <td className="px-4 py-2.5 font-mono font-bold text-xs text-foreground border-r border-border whitespace-nowrap">Spray Pump</td>
-                  <td className="px-3 py-1.5 border-r border-border"><Field value={cp.sprayPump.fillRate} onChange={v => setPump("sprayPump", "fillRate", v)} /></td>
-                  <td className="px-3 py-1.5 border-r border-border"><Field value={cp.sprayPump.totalPumps} onChange={v => setPump("sprayPump", "totalPumps", v)} /></td>
+                  <td className="px-3 py-1.5 border-r border-border"><TextField canEdit={canEdit} value={cp.sprayPump.fillRate} onChange={v => setPump("sprayPump", "fillRate", v)} /></td>
+                  <td className="px-3 py-1.5 border-r border-border"><NumberField canEdit={canEdit} value={cp.sprayPump.totalPumps} onChange={v => setPump("sprayPump", "totalPumps", v)} /></td>
                   <td className="px-3 py-1.5 border-r border-border text-center"><span className="font-mono text-xs text-muted-foreground">—</span></td>
                   <td className="px-3 py-1.5 border-r border-border text-center"><span className="font-mono text-xs text-muted-foreground">—</span></td>
                   <td className="px-3 py-1.5 text-center"><span className="font-mono text-xs text-muted-foreground">—</span></td>
@@ -202,8 +250,8 @@ export function CargoManagementSection({ canEdit, data: dataProp, onChange }: Pr
                 {/* Emergency Cargo Pump */}
                 <tr className="border-b border-border">
                   <td className="px-4 py-2.5 font-mono font-bold text-xs text-foreground border-r border-border whitespace-nowrap">Emergency Cargo Pump</td>
-                  <td className="px-3 py-1.5 border-r border-border"><Field value={cp.emergencyCargoPump.fillRate} onChange={v => setPump("emergencyCargoPump", "fillRate", v)} /></td>
-                  <td className="px-3 py-1.5 border-r border-border"><Field value={cp.emergencyCargoPump.totalPumps} onChange={v => setPump("emergencyCargoPump", "totalPumps", v)} /></td>
+                  <td className="px-3 py-1.5 border-r border-border"><TextField canEdit={canEdit} value={cp.emergencyCargoPump.fillRate} onChange={v => setPump("emergencyCargoPump", "fillRate", v)} /></td>
+                  <td className="px-3 py-1.5 border-r border-border"><NumberField canEdit={canEdit} value={cp.emergencyCargoPump.totalPumps} onChange={v => setPump("emergencyCargoPump", "totalPumps", v)} /></td>
                   <td className="px-3 py-1.5 border-r border-border text-center"><span className="font-mono text-xs text-muted-foreground">—</span></td>
                   <td className="px-3 py-1.5 border-r border-border text-center"><span className="font-mono text-xs text-muted-foreground">—</span></td>
                   <td className="px-3 py-1.5 text-center"><span className="font-mono text-xs text-muted-foreground">—</span></td>
@@ -213,9 +261,9 @@ export function CargoManagementSection({ canEdit, data: dataProp, onChange }: Pr
                   <td className="px-4 py-2.5 font-mono font-bold text-xs text-foreground border-r border-border whitespace-nowrap">High Duty Compressor</td>
                   <td className="px-3 py-1.5 border-r border-border text-center"><span className="font-mono text-xs text-muted-foreground">—</span></td>
                   <td className="px-3 py-1.5 border-r border-border text-center"><span className="font-mono text-xs text-muted-foreground">—</span></td>
-                  <td className="px-3 py-1.5 border-r border-border"><Field value={cp.highDutyCompressor.units} onChange={v => setPump("highDutyCompressor", "units", v)} /></td>
-                  <td className="px-3 py-1.5 border-r border-border"><Field value={cp.highDutyCompressor.rate} onChange={v => setPump("highDutyCompressor", "rate", v)} /></td>
-                  <td className="px-3 py-1.5"><Field value={cp.highDutyCompressor.pressure} onChange={v => setPump("highDutyCompressor", "pressure", v)} /></td>
+                  <td className="px-3 py-1.5 border-r border-border"><NumberField canEdit={canEdit} value={cp.highDutyCompressor.units} onChange={v => setPump("highDutyCompressor", "units", v)} /></td>
+                  <td className="px-3 py-1.5 border-r border-border"><TextField canEdit={canEdit} value={cp.highDutyCompressor.rate} onChange={v => setPump("highDutyCompressor", "rate", v)} /></td>
+                  <td className="px-3 py-1.5"><NumberField canEdit={canEdit} value={cp.highDutyCompressor.pressure} onChange={v => setPump("highDutyCompressor", "pressure", v)} /></td>
                 </tr>
               </tbody>
             </table>
@@ -238,27 +286,27 @@ export function CargoManagementSection({ canEdit, data: dataProp, onChange }: Pr
                 </tr>
               </thead>
               <tbody>
-                {([
-                  { label: "GCU",            key: "gcu"            as keyof GasManagementData },
-                  { label: "Gas Burning",    key: "gasBurning"     as keyof GasManagementData },
-                  { label: "Reliquefaction", key: "reliquefaction" as keyof GasManagementData },
-                ] as const).map(({ label, key }) => {
-                  const entry = gm[key];
-                  return (
-                    <tr key={key} className="border-b border-border last:border-0">
-                      <td className="px-4 py-2.5 font-mono font-bold text-xs text-foreground border-r border-border whitespace-nowrap">{label}</td>
-                      <td className="px-3 py-1.5 border-r border-border">
-                        <TextField value={entry.capacity} onChange={v => setGas(key, "capacity", v)} />
-                      </td>
-                      <td className="px-3 py-1.5 border-r border-border">
-                        <Field value={entry.timeStart} onChange={v => setGas(key, "timeStart", v)} />
-                      </td>
-                      <td className="px-3 py-1.5">
-                        <Field value={entry.timeStop} onChange={v => setGas(key, "timeStop", v)} />
-                      </td>
-                    </tr>
-                  );
-                })}
+                <GasRow
+                  label="GCU"
+                  fieldKey="gcu"
+                  entry={gm.gcu ?? defaultGasSystemEntry()}
+                  canEdit={canEdit}
+                  onFieldChange={(key, field, value) => setGas(key, field, value)}
+                />
+                <GasRow
+                  label="Gas Burning"
+                  fieldKey="gasBurning"
+                  entry={gm.gasBurning ?? defaultGasSystemEntry()}
+                  canEdit={canEdit}
+                  onFieldChange={(key, field, value) => setGas(key, field, value)}
+                />
+                <GasRow
+                  label="Reliquefaction"
+                  fieldKey="reliquefaction"
+                  entry={gm.reliquefaction ?? defaultGasSystemEntry()}
+                  canEdit={canEdit}
+                  onFieldChange={(key, field, value) => setGas(key, field, value)}
+                />
               </tbody>
             </table>
           </div>

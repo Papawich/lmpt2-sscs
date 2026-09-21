@@ -58,6 +58,20 @@ export async function notifyAdminNewRegistration(opts: {
   );
 }
 
+
+export async function notifyUserAccountApproved(opts: {
+  userName: string;
+  userEmail: string;
+  approvedByName: string;
+}) {
+  await send(
+    opts.userEmail,
+    "Account Approved — LMPT2 SSCS",
+    `Hello ${opts.userName},\n\nYour LMPT2 SSCS account has been approved.\n\nApproved by : ${opts.approvedByName}\n\nYou can now sign in and access the system.`,
+    "LMPT2 SSCS — Account Approval",
+  );
+}
+
 export async function notifyTerminalOfficerAccessRequest(opts: {
   vesselName: string;
   requesterName: string;

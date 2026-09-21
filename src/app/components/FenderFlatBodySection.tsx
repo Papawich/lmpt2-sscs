@@ -528,7 +528,6 @@ function BerthingEnergyTab({
   data: dataProp, canEdit, onChange,
 }: { data: BerthingEnergyData; canEdit: boolean; onChange: (d: BerthingEnergyData) => void }) {
   const data = dataProp ?? defaultBerthingEnergyData();
-  const yi = "w-full bg-yellow-100 border border-yellow-400 rounded px-1.5 py-1 text-xs text-gray-900 placeholder:text-gray-400 focus:outline-none focus:border-yellow-500 focus:ring-1 focus:ring-yellow-400 transition-all text-center font-mono";
   const fc = "text-center font-mono text-xs text-foreground"; // fixed / calculated cell
 
   const energy = calcBerthingEnergy(data.displacement);
@@ -567,11 +566,12 @@ function BerthingEnergyTab({
           </thead>
           <tbody>
             <tr>
-              {/* Displacement — yellow input */}
+              {/* Displacement — linked automatically from General Information / Ship Major Dimensions */}
               <td className="px-2 py-1.5 border-r border-border">
-                {canEdit
-                  ? <input type="text" value={data.displacement ?? ""} onChange={e => onChange({ ...data, displacement: e.target.value })} className={yi} />
-                  : <span className={fc}>{data.displacement || "—"}</span>}
+                <div className="text-center">
+                  <span className={fc}>{data.displacement || "—"}</span>
+                  {canEdit && <span className="block font-mono text-[8px] text-muted-foreground mt-0.5">Auto-linked from Ship Major Dimensions</span>}
+                </div>
               </td>
               {/* Fixed values */}
               <td className="px-3 py-2 border-r border-border"><span className={fc}>{BE_VELOCITY.toFixed(2)}</span></td>

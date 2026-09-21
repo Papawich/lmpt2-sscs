@@ -321,12 +321,12 @@ export function UnloadingArmSection({ canEdit, data: dataProp, onChange, manifol
                     <SlotCell v={c.l4} last />
                     <td className="px-2 py-1 border-r border-border">
                       {canEdit
-                        ? <input type="number" value={row.flowrate ?? ""} onChange={e => setRow(i, "flowrate", e.target.value)} placeholder="—" step="0.1" className={yi} />
+                        ? <input type="text" value={row.flowrate ?? ""} onChange={e => setRow(i, "flowrate", e.target.value)} placeholder="—" className={yi} />
                         : <span className={ro}>{row.flowrate || "—"}</span>}
                     </td>
                     <td className="px-2 py-1">
                       {canEdit
-                        ? <input type="number" value={row.pressure ?? ""} onChange={e => setRow(i, "pressure", e.target.value)} placeholder="—" step="0.01" className={yi} />
+                        ? <input type="text" value={row.pressure ?? ""} onChange={e => setRow(i, "pressure", e.target.value)} placeholder="—" className={yi} />
                         : <span className={ro}>{row.pressure || "—"}</span>}
                     </td>
                   </tr>

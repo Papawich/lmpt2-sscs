@@ -9,3 +9,13 @@
 - Added SQL migrations for schema, RLS, storage policies, auditing, and the 58 original vessel seed records.
 - Kept EmailJS workflow notifications. EmailJS settings can now be overridden with environment variables; the original configured values remain as fallback for compatibility with this export.
 - Added optional `VITE_ADMIN_NOTIFICATION_EMAILS` for new-registration alerts in cloud mode.
+
+## Pilot feedback update — 19 Sep 2026
+
+- Auto-link Ship Major Dimensions displacement to Berthing Energy.
+- Free-text Fill Rate / compressor Rate / Gas Management start-stop times.
+- Free-text Unloading Arm maximum flowrate and manifold pressure.
+- Utility Supply Available / Not Available checkbox pairs.
+- Email notification to user after admin account approval.
+- New Attachment tab for vessel photos; submitted photos appear in SSCS Summary.
+- Added `npm run preview` script.

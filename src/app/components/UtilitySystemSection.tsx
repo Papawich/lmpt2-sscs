@@ -9,9 +9,11 @@ export interface FireFightingData {
   cargoFrontDome:    string;   // f. Cargo Front Dome Part
 }
 
+export type AvailabilityValue = "" | "available" | "not_available";
+
 export interface UtilitySupplyData {
-  nitrogenService: boolean;
-  freshWater:      boolean;
+  nitrogenService: AvailabilityValue;
+  freshWater:      AvailabilityValue;
 }
 
 export interface UtilityData {
@@ -27,15 +29,24 @@ export function defaultUtilityData(): UtilityData {
       exposedDeck: "", loadingStation: "", accomHouse: "",
       sidePlating: "", cargoMachineryRm: "", cargoFrontDome: "",
     },
-    utilitySupply: { nitrogenService: false, freshWater: false },
+    utilitySupply: { nitrogenService: "", freshWater: "" },
   };
+}
+
+function normalizeAvailability(value: unknown): AvailabilityValue {
+  if (value === true || value === "available") return "available";
+  if (value === false || value === "not_available") return "not_available";
+  return "";
 }
 
 export function isUtilityComplete(data: UtilityData | undefined): boolean {
   const d = data ?? defaultUtilityData();
   const ff = d.fireFighting;
+  const nitrogen = normalizeAvailability((d.utilitySupply as any)?.nitrogenService);
+  const freshWater = normalizeAvailability((d.utilitySupply as any)?.freshWater);
   return !!(ff.exposedDeck && ff.loadingStation && ff.accomHouse &&
-            ff.sidePlating && ff.cargoMachineryRm && ff.cargoFrontDome);
+            ff.sidePlating && ff.cargoMachineryRm && ff.cargoFrontDome &&
+            nitrogen && freshWater);
 }
 
 // ─── Shared styles ────────────────────────────────────────────────────────────
@@ -79,8 +90,13 @@ export function UtilitySystemSection({ canEdit, data: dp, onChange }: Props) {
   const setFF = (f: keyof FireFightingData, v: string) =>
     onChange({ ...data, fireFighting: { ...data.fireFighting, [f]: v } });
 
-  const setUS = (f: keyof UtilitySupplyData, v: boolean) =>
-    onChange({ ...data, utilitySupply: { ...data.utilitySupply, [f]: v } });
+  const utilitySupply: UtilitySupplyData = {
+    nitrogenService: normalizeAvailability((data.utilitySupply as any)?.nitrogenService),
+    freshWater: normalizeAvailability((data.utilitySupply as any)?.freshWater),
+  };
+
+  const setUS = (f: keyof UtilitySupplyData, v: AvailabilityValue) =>
+    onChange({ ...data, utilitySupply: { ...utilitySupply, [f]: v } });
 
   return (
     <div className="space-y-5 mb-6">
@@ -174,20 +190,29 @@ export function UtilitySystemSection({ canEdit, data: dp, onChange }: Props) {
                     <td className="px-1 py-3 text-muted-foreground text-xs w-4">:</td>
                     <td className="px-4 py-3">
                       {canEdit ? (
-                        <label className="flex items-center gap-3 cursor-pointer w-fit">
-                          <input
-                            type="checkbox"
-                            checked={data.utilitySupply.nitrogenService}
-                            onChange={e => setUS("nitrogenService", e.target.checked)}
-                            className="w-4 h-4 accent-[#1e3a8a] cursor-pointer"
-                          />
-                          <span className="font-mono text-xs text-foreground">
-                            {data.utilitySupply.nitrogenService ? "Available" : "Not Available"}
-                          </span>
-                        </label>
+                        <div className="flex flex-wrap items-center gap-5">
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={utilitySupply.nitrogenService === "available"}
+                              onChange={e => setUS("nitrogenService", e.target.checked ? "available" : "")}
+                              className="w-4 h-4 accent-[#1e3a8a] cursor-pointer"
+                            />
+                            <span className="font-mono text-xs text-foreground">Available</span>
+                          </label>
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={utilitySupply.nitrogenService === "not_available"}
+                              onChange={e => setUS("nitrogenService", e.target.checked ? "not_available" : "")}
+                              className="w-4 h-4 accent-[#1e3a8a] cursor-pointer"
+                            />
+                            <span className="font-mono text-xs text-foreground">Not Available</span>
+                          </label>
+                        </div>
                       ) : (
-                        <span className={`font-mono text-sm ${data.utilitySupply.nitrogenService ? "text-emerald-600 font-bold" : "text-muted-foreground"}`}>
-                          {data.utilitySupply.nitrogenService ? "Available" : "Not Available"}
+                        <span className={`font-mono text-sm ${utilitySupply.nitrogenService === "available" ? "text-emerald-600 font-bold" : "text-muted-foreground"}`}>
+                          {utilitySupply.nitrogenService === "available" ? "Available" : utilitySupply.nitrogenService === "not_available" ? "Not Available" : "—"}
                         </span>
                       )}
                     </td>
@@ -200,20 +225,29 @@ export function UtilitySystemSection({ canEdit, data: dp, onChange }: Props) {
                     <td className="px-1 py-3 text-muted-foreground text-xs">:</td>
                     <td className="px-4 py-3">
                       {canEdit ? (
-                        <label className="flex items-center gap-3 cursor-pointer w-fit">
-                          <input
-                            type="checkbox"
-                            checked={data.utilitySupply.freshWater}
-                            onChange={e => setUS("freshWater", e.target.checked)}
-                            className="w-4 h-4 accent-[#1e3a8a] cursor-pointer"
-                          />
-                          <span className="font-mono text-xs text-foreground">
-                            {data.utilitySupply.freshWater ? "Available" : "Not Available"}
-                          </span>
-                        </label>
+                        <div className="flex flex-wrap items-center gap-5">
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={utilitySupply.freshWater === "available"}
+                              onChange={e => setUS("freshWater", e.target.checked ? "available" : "")}
+                              className="w-4 h-4 accent-[#1e3a8a] cursor-pointer"
+                            />
+                            <span className="font-mono text-xs text-foreground">Available</span>
+                          </label>
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={utilitySupply.freshWater === "not_available"}
+                              onChange={e => setUS("freshWater", e.target.checked ? "not_available" : "")}
+                              className="w-4 h-4 accent-[#1e3a8a] cursor-pointer"
+                            />
+                            <span className="font-mono text-xs text-foreground">Not Available</span>
+                          </label>
+                        </div>
                       ) : (
-                        <span className={`font-mono text-sm ${data.utilitySupply.freshWater ? "text-emerald-600 font-bold" : "text-muted-foreground"}`}>
-                          {data.utilitySupply.freshWater ? "Available" : "Not Available"}
+                        <span className={`font-mono text-sm ${utilitySupply.freshWater === "available" ? "text-emerald-600 font-bold" : "text-muted-foreground"}`}>
+                          {utilitySupply.freshWater === "available" ? "Available" : utilitySupply.freshWater === "not_available" ? "Not Available" : "—"}
                         </span>
                       )}
                     </td>
