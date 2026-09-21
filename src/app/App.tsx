@@ -27,7 +27,7 @@ import {
   signUp as cloudSignUp,
   signOut as cloudSignOut,
   sendPasswordReset,
-  verifyPasswordRecoveryOtp,
+  verifyPasswordRecoveryLink,
   updatePassword,
   onAuthStateChange,
   fetchMyProfile,
@@ -247,7 +247,7 @@ type AccountStatus  = "pending" | "approved" | "rejected";
 type StudyStatus    = "access_requested" | "access_rejected" | "draft" | "submitted" | "approved" | "edit_requested" | "editing";
 type Page           = "login" | "register" | "forgot" | "home" | "vessel" | "study" | "admin";
 type RegStep        = "form" | "otp" | "submitted";
-type ForgotStep     = "email" | "otp" | "password" | "done";
+type ForgotStep     = "email" | "sent" | "confirm" | "password" | "done";
 type AdminTab       = "pending" | "approved" | "rejected" | "all";
 
 interface UserAccount {
@@ -634,10 +634,10 @@ export default function App() {
   const [otpSending, setOtpSending] = useState(false);
   const [otpErr, setOtpErr]         = useState("");
 
-  // ── Forgot password / recovery OTP state ─────────────────────────────────────
+  // ── Forgot password / confirmed recovery-link state ────────────────────────────
   const [forgotEmail, setForgotEmail]       = useState("");
   const [forgotStep, setForgotStep]         = useState<ForgotStep>("email");
-  const [forgotOtp, setForgotOtp]           = useState("");
+  const [forgotTokenHash, setForgotTokenHash] = useState("");
   const [forgotNewPw, setForgotNewPw]       = useState("");
   const [forgotConfirmPw, setForgotConfirmPw] = useState("");
   const [forgotErr, setForgotErr]           = useState("");
@@ -738,10 +738,11 @@ export default function App() {
     };
   }, []);
 
-  // Supabase recovery links still work as a fallback. If a valid recovery link is
-  // opened, Supabase emits PASSWORD_RECOVERY and we show the new-password form.
-  // The primary flow below uses a 6-digit recovery OTP to avoid corporate email
-  // link scanners consuming one-time reset links before the user clicks them.
+  // Fallback compatibility for Supabase's default recovery link. If a valid
+  // ConfirmationURL was used, Supabase emits PASSWORD_RECOVERY and we can still
+  // show the new-password form. The preferred flow uses a custom email template
+  // with TokenHash and an in-app confirmation step, so corporate link scanners
+  // cannot consume the one-time token just by prefetching the email URL.
   useEffect(() => {
     if (!supabaseConfigured) return;
     const { data } = onAuthStateChange((event, session) => {
@@ -754,12 +755,23 @@ export default function App() {
     return () => data.subscription.unsubscribe();
   }, []);
 
-  // Show a useful message for old/expired recovery links and remove the error
-  // parameters from the address bar so they do not keep reappearing.
+  // Custom recovery-email entry point. Opening this URL does NOT verify or consume
+  // the token. Verification happens only after the user clicks Confirm Reset.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
+    const tokenHash = params.get("token_hash");
+    const isRecovery = params.get("reset_password") === "1" && params.get("type") === "recovery";
+
+    if (isRecovery && tokenHash) {
+      setForgotTokenHash(tokenHash);
+      setForgotErr("");
+      setForgotStep("confirm");
+      setPage("forgot");
+      return;
+    }
+
     if (params.get("error_code") === "otp_expired") {
-      setLoginErr("That password reset link is invalid or expired. Use Forgot password to request a new 6-digit recovery code.");
+      setLoginErr("That password reset link is invalid or expired. Use Forgot password to request a new reset email.");
       window.history.replaceState({}, document.title, window.location.pathname);
     }
   }, []);
@@ -907,7 +919,7 @@ export default function App() {
     }
   }
 
-  async function sendForgotRecoveryOtp() {
+  async function sendForgotResetEmail() {
     setForgotErr("");
     if (!forgotEmail.includes("@")) {
       setForgotErr("Enter a valid registered email address.");
@@ -920,11 +932,10 @@ export default function App() {
     setForgotLoading(true);
     try {
       await sendPasswordReset(forgotEmail.trim());
-      setForgotOtp("");
-      setForgotStep("otp");
+      setForgotStep("sent");
     } catch (err) {
-      console.error("[Password recovery OTP send failed]", err);
-      setForgotErr(err instanceof Error ? err.message : "Unable to send recovery code.");
+      console.error("[Password recovery email send failed]", err);
+      setForgotErr(err instanceof Error ? err.message : "Unable to send password reset email.");
     } finally {
       setForgotLoading(false);
     }
@@ -932,26 +943,29 @@ export default function App() {
 
   async function handleForgotPassword(e: React.FormEvent) {
     e.preventDefault();
-    await sendForgotRecoveryOtp();
+    await sendForgotResetEmail();
   }
 
-  async function handleVerifyRecoveryOtp(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleConfirmRecoveryLink() {
     setForgotErr("");
-    const token = forgotOtp.replace(/\s/g, "");
-    if (!/^\d{6}$/.test(token)) {
-      setForgotErr("Enter the 6-digit recovery code from your email.");
+    if (!forgotTokenHash) {
+      setForgotErr("This password reset request is missing its verification token. Request a new reset email.");
+      return;
+    }
+    if (!supabaseConfigured) {
+      setForgotErr("Password recovery requires Supabase to be configured.");
       return;
     }
     setForgotLoading(true);
     try {
-      await verifyPasswordRecoveryOtp(forgotEmail.trim(), token);
+      await verifyPasswordRecoveryLink(forgotTokenHash);
       setForgotNewPw("");
       setForgotConfirmPw("");
       setForgotStep("password");
+      window.history.replaceState({}, document.title, window.location.pathname);
     } catch (err) {
-      console.error("[Password recovery OTP verify failed]", err);
-      setForgotErr(err instanceof Error ? err.message : "Invalid or expired recovery code.");
+      console.error("[Password recovery link verify failed]", err);
+      setForgotErr("This password reset request is invalid or expired. Return to Sign In and request a new reset email.");
     } finally {
       setForgotLoading(false);
     }
@@ -984,7 +998,7 @@ export default function App() {
   function resetForgot() {
     setForgotEmail("");
     setForgotStep("email");
-    setForgotOtp("");
+    setForgotTokenHash("");
     setForgotNewPw("");
     setForgotConfirmPw("");
     setForgotErr("");
@@ -1499,56 +1513,44 @@ export default function App() {
   );
 
   // ─────────────────────────────────────────────────────────────────────────
-  // FORGOT PASSWORD — SUPABASE RECOVERY OTP
+  // FORGOT PASSWORD — CONFIRMED RECOVERY LINK
   // ─────────────────────────────────────────────────────────────────────────
   if (page === "forgot") return (
     <div className="min-h-screen bg-background flex items-center justify-center p-6 relative overflow-hidden" style={font}>
       <GridBg />
       <div className="w-full max-w-sm relative z-10">
-        <button onClick={() => { resetForgot(); setPage("login"); }} className="flex items-center gap-2 text-xs font-mono text-muted-foreground hover:text-foreground transition-colors mb-8"><ArrowLeft className="w-3.5 h-3.5" />Back to Sign In</button>
+        <button onClick={() => { resetForgot(); window.history.replaceState({}, document.title, window.location.pathname); setPage("login"); }} className="flex items-center gap-2 text-xs font-mono text-muted-foreground hover:text-foreground transition-colors mb-8"><ArrowLeft className="w-3.5 h-3.5" />Back to Sign In</button>
         <div className="mb-8"><Logo /></div>
 
         {forgotStep === "email" && (
           <>
-            <div className="mb-8"><h2 className="font-mono text-xl font-bold text-foreground tracking-wide mb-1">RESET PASSWORD</h2><p className="text-sm text-muted-foreground">Enter your registered email. We will send a 6-digit recovery code.</p></div>
+            <div className="mb-8"><h2 className="font-mono text-xl font-bold text-foreground tracking-wide mb-1">RESET PASSWORD</h2><p className="text-sm text-muted-foreground">Enter your registered email. We will send a secure password-reset confirmation link.</p></div>
             <form onSubmit={handleForgotPassword} className="space-y-4">
               {forgotErr && <div className="flex items-start gap-2.5 p-3 rounded bg-destructive/10 border border-destructive/30 text-destructive text-sm"><AlertCircle className="w-4 h-4 mt-0.5 shrink-0" /><span>{forgotErr}</span></div>}
               <Field label="Registered Email" value={forgotEmail} onChange={setForgotEmail} type="email" placeholder="you@company.com" icon={Mail} />
               <button type="submit" disabled={forgotLoading} className="w-full bg-primary text-primary-foreground font-mono font-semibold text-sm tracking-widest uppercase py-2.5 rounded hover:bg-primary/90 transition-all flex items-center justify-center gap-2 disabled:opacity-60">
-                {forgotLoading ? <><RefreshCw className="w-4 h-4 animate-spin" />Sending…</> : <>Send Recovery Code<ChevronRight className="w-4 h-4" /></>}
+                {forgotLoading ? <><RefreshCw className="w-4 h-4 animate-spin" />Sending…</> : <>Send Reset Email<ChevronRight className="w-4 h-4" /></>}
               </button>
             </form>
           </>
         )}
 
-        {forgotStep === "otp" && (
+        {forgotStep === "sent" && (
+          <div className="p-5 rounded border border-primary/25 bg-primary/5 flex flex-col items-center gap-3 text-center">
+            <Mail className="w-10 h-10 text-primary" />
+            <div><p className="font-mono font-semibold text-foreground text-sm">Check Your Email</p><p className="text-xs text-muted-foreground mt-1">If an account exists for <span className="font-mono text-foreground">{forgotEmail}</span>, a password-reset email has been sent.</p></div>
+            <button onClick={() => { setForgotErr(""); setForgotStep("email"); }} className="text-xs font-mono text-primary hover:text-primary/80 mt-2">Use another email →</button>
+          </div>
+        )}
+
+        {forgotStep === "confirm" && (
           <>
-            <div className="mb-8"><h2 className="font-mono text-xl font-bold text-foreground tracking-wide mb-1">VERIFY RECOVERY CODE</h2><p className="text-sm text-muted-foreground">Enter the 6-digit code sent to <span className="font-mono text-foreground">{forgotEmail}</span>.</p></div>
-            <form onSubmit={handleVerifyRecoveryOtp} className="space-y-4">
-              {forgotErr && <div className="flex items-start gap-2.5 p-3 rounded bg-destructive/10 border border-destructive/30 text-destructive text-sm"><AlertCircle className="w-4 h-4 mt-0.5 shrink-0" /><span>{forgotErr}</span></div>}
-              <div className="space-y-1.5">
-                <label className="font-mono text-xs text-muted-foreground uppercase tracking-widest">6-Digit Recovery Code</label>
-                <div className="relative">
-                  <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-                  <input
-                    value={forgotOtp}
-                    onChange={e => setForgotOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                    inputMode="numeric"
-                    autoComplete="one-time-code"
-                    maxLength={6}
-                    placeholder="000000"
-                    className="w-full bg-input-background border border-border rounded pl-10 pr-3 py-2.5 text-sm font-mono tracking-[0.35em] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/20"
-                  />
-                </div>
-              </div>
-              <button type="submit" disabled={forgotLoading || forgotOtp.length !== 6} className="w-full bg-primary text-primary-foreground font-mono font-semibold text-sm tracking-widest uppercase py-2.5 rounded hover:bg-primary/90 transition-all flex items-center justify-center gap-2 disabled:opacity-60">
-                {forgotLoading ? <><RefreshCw className="w-4 h-4 animate-spin" />Verifying…</> : <>Verify Code<ChevronRight className="w-4 h-4" /></>}
-              </button>
-              <div className="flex items-center justify-between pt-1">
-                <button type="button" onClick={() => { setForgotErr(""); setForgotStep("email"); }} className="text-xs font-mono text-muted-foreground hover:text-primary">Change email</button>
-                <button type="button" disabled={forgotLoading} onClick={() => void sendForgotRecoveryOtp()} className="text-xs font-mono text-primary hover:text-primary/80 disabled:opacity-50">Resend code</button>
-              </div>
-            </form>
+            <div className="mb-8"><h2 className="font-mono text-xl font-bold text-foreground tracking-wide mb-1">CONFIRM PASSWORD RESET</h2><p className="text-sm text-muted-foreground">This page was opened from your password-reset email. Confirm below to verify the request and continue.</p></div>
+            {forgotErr && <div className="flex items-start gap-2.5 p-3 rounded bg-destructive/10 border border-destructive/30 text-destructive text-sm mb-4"><AlertCircle className="w-4 h-4 mt-0.5 shrink-0" /><span>{forgotErr}</span></div>}
+            <div className="p-4 rounded border border-border bg-muted/20 mb-4 text-xs text-muted-foreground leading-relaxed">For security, simply opening the email link does not reset your password. The one-time reset token is verified only when you press the button below.</div>
+            <button type="button" onClick={() => void handleConfirmRecoveryLink()} disabled={forgotLoading} className="w-full bg-primary text-primary-foreground font-mono font-semibold text-sm tracking-widest uppercase py-2.5 rounded hover:bg-primary/90 transition-all flex items-center justify-center gap-2 disabled:opacity-60">
+              {forgotLoading ? <><RefreshCw className="w-4 h-4 animate-spin" />Verifying…</> : <>Confirm Password Reset<ShieldCheck className="w-4 h-4" /></>}
+            </button>
           </>
         )}
 
