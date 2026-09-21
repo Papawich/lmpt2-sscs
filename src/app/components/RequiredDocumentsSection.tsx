@@ -21,7 +21,8 @@ export type DocKey =
   | "d_3_1" | "d_3_2" | "d_3_3" | "d_3_4"
   | "d_4_1" | "d_4_2"
   | "d_5_1" | "d_5_2" | "d_5_3"
-  | "d_6_1";
+  | "d_6_1"
+  | "d_7_1" | "d_7_2" | "d_7_3" | "d_7_4" | "d_7_5" | "d_7_6";
 
 export type RequiredDocumentsData = Record<DocKey, UploadedFile[]>;
 
@@ -33,8 +34,11 @@ const BASE_KEYS: DocKey[] = [
   "d_3_1", "d_3_2", "d_3_3", "d_3_4",
   "d_4_1", "d_4_2",
   "d_5_1", "d_5_2", "d_5_3",
+  // Quality Assessment — vessel-specific mandatory evidence
+  "d_7_1", "d_7_2", "d_7_6",
 ];
-const ALL_KEYS: DocKey[] = [...BASE_KEYS, "d_6_1"];
+const OPTIONAL_QUALITY_KEYS: DocKey[] = ["d_7_3", "d_7_4", "d_7_5"];
+const ALL_KEYS: DocKey[] = [...BASE_KEYS, "d_6_1", ...OPTIONAL_QUALITY_KEYS];
 
 export function defaultRequiredDocumentsData(): RequiredDocumentsData {
   return Object.fromEntries(ALL_KEYS.map(k => [k, []])) as RequiredDocumentsData;
@@ -42,7 +46,7 @@ export function defaultRequiredDocumentsData(): RequiredDocumentsData {
 
 export function isRequiredDocumentsComplete(data: RequiredDocumentsData | undefined, sisterShip = false): boolean {
   const d = data ?? defaultRequiredDocumentsData();
-  const required = sisterShip ? ALL_KEYS : BASE_KEYS;
+  const required = sisterShip ? [...BASE_KEYS, "d_6_1" as DocKey] : BASE_KEYS;
   return required.every(k => (d[k]?.length ?? 0) > 0);
 }
 
@@ -99,6 +103,17 @@ const GROUPS: DocGroup[] = [
     title: "6. Sister Ship Statement",
     items: [
       { key: "d_6_1", num: "6.1", label: "Sister Ship Statement" },
+    ],
+  },
+  {
+    title: "7. Quality Assessment",
+    items: [
+      { key: "d_7_1", num: "7.1", label: "P&I Certificate of Entry" },
+      { key: "d_7_2", num: "7.2", label: "Class Survey Status / List of Survey Status issued by Classification Society" },
+      { key: "d_7_3", num: "7.3", label: "Condition Assessment Program (CAP Rating)" },
+      { key: "d_7_4", num: "7.4", label: "Latest Port State Control Inspection Report" },
+      { key: "d_7_5", num: "7.5", label: "Vetting History (at least 1 year) and SIRE Inspection Report" },
+      { key: "d_7_6", num: "7.6", label: "Certificate of Registry" },
     ],
   },
 ];
@@ -214,7 +229,7 @@ export function RequiredDocumentsSection({
   // sister ships, and optional for other vessels so the statement can be added or
   // updated later when new sister-ship relationships are established.
   const visibleKeys = ALL_KEYS;
-  const requiredKeys = sisterShip ? ALL_KEYS : BASE_KEYS;
+  const requiredKeys = sisterShip ? [...BASE_KEYS, "d_6_1" as DocKey] : BASE_KEYS;
   const totalUploaded = visibleKeys.reduce((n, k) => n + (data[k]?.length ?? 0), 0);
   const totalRequired = requiredKeys.length;
   const slotsWithFile = requiredKeys.filter(k => (data[k]?.length ?? 0) > 0).length;
@@ -299,6 +314,9 @@ export function RequiredDocumentsSection({
                             )}
                             {key === "d_6_1" && !sisterShip && (
                               <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-amber-500/25 bg-amber-500/8 text-amber-400">Optional until used as sister ship</span>
+                            )}
+                            {OPTIONAL_QUALITY_KEYS.includes(key) && (
+                              <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-amber-500/25 bg-amber-500/8 text-amber-400">Optional / if available</span>
                             )}
                           </div>
 
