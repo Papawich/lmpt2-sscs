@@ -96,7 +96,7 @@ const GROUPS: DocGroup[] = [
     ],
   },
   {
-    title: "6. Sister Ship",
+    title: "6. Sister Ship Statement",
     items: [
       { key: "d_6_1", num: "6.1", label: "Sister Ship Statement" },
     ],
@@ -210,10 +210,14 @@ export function RequiredDocumentsSection({
     }
   }
 
-  const visibleKeys = sisterShip ? ALL_KEYS : BASE_KEYS;
+  // Sister Ship Statement is always visible. It is required for vessels declared as
+  // sister ships, and optional for other vessels so the statement can be added or
+  // updated later when new sister-ship relationships are established.
+  const visibleKeys = ALL_KEYS;
+  const requiredKeys = sisterShip ? ALL_KEYS : BASE_KEYS;
   const totalUploaded = visibleKeys.reduce((n, k) => n + (data[k]?.length ?? 0), 0);
-  const totalRequired = visibleKeys.length;
-  const slotsWithFile = visibleKeys.filter(k => (data[k]?.length ?? 0) > 0).length;
+  const totalRequired = requiredKeys.length;
+  const slotsWithFile = requiredKeys.filter(k => (data[k]?.length ?? 0) > 0).length;
   const inherited = new Set(inheritedKeys);
 
   return (
@@ -254,7 +258,7 @@ export function RequiredDocumentsSection({
           </div>
         )}
         <div className="p-5 space-y-6">
-          {GROUPS.filter(group => sisterShip || group.title !== "6. Sister Ship").map(group => (
+          {GROUPS.map(group => (
             <div key={group.title}>
               {/* Group heading */}
               <div className="flex items-center gap-3 mb-3">
@@ -270,8 +274,10 @@ export function RequiredDocumentsSection({
                   const files = data[key] ?? [];
                   const hasFiles = files.length > 0;
                   const isInherited = sisterShipVerified && inherited.has(key);
-                  const isLockedStatement = sisterShipVerified && key === "d_6_1";
-                  const isLocked = isInherited || isLockedStatement;
+                  // The Sister Ship Statement must stay editable (subject to the normal
+                  // study edit permission) even after sister-ship verification, because
+                  // the statement can be revised as additional sister ships are added.
+                  const isLocked = isInherited;
 
                   return (
                     <div key={key} className={`px-4 py-3 transition-colors ${hasFiles ? "bg-emerald-500/[0.03]" : ""}`}>
@@ -291,8 +297,8 @@ export function RequiredDocumentsSection({
                                 From {referenceVesselName || "reference ship"}
                               </span>
                             )}
-                            {isLockedStatement && (
-                              <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-emerald-500/25 bg-emerald-500/8 text-emerald-400">Verified statement</span>
+                            {key === "d_6_1" && !sisterShip && (
+                              <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-amber-500/25 bg-amber-500/8 text-amber-400">Optional until used as sister ship</span>
                             )}
                           </div>
 
