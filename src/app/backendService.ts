@@ -23,6 +23,33 @@ export type CloudUploadedFile = {
   storagePath?: string;
 };
 
+
+export type CloudPasswordResetRequest = {
+  id: string;
+  userId: string | null;
+  email: string;
+  status: "pending" | "approved" | "rejected" | "completed";
+  requestedAt: string;
+  approvedAt?: string | null;
+  approvedBy?: string | null;
+  completedAt?: string | null;
+  expiresAt?: string | null;
+};
+
+function passwordResetFromRow(row: any): CloudPasswordResetRequest {
+  return {
+    id: row.id,
+    userId: row.user_id ?? null,
+    email: row.email ?? "",
+    status: row.status,
+    requestedAt: row.requested_at,
+    approvedAt: row.approved_at ?? null,
+    approvedBy: row.approved_by ?? null,
+    completedAt: row.completed_at ?? null,
+    expiresAt: row.expires_at ?? null,
+  };
+}
+
 type AnyVessel = Record<string, any>;
 type AnyStudy = Record<string, any>;
 
@@ -199,6 +226,72 @@ export async function updatePassword(password: string) {
   const { data, error } = await client.auth.updateUser({ password });
   if (error) throw error;
   return data;
+}
+
+/**
+ * Password recovery without SMTP/email. The request is created through a
+ * Supabase Edge Function so no service-role credential is ever exposed in the
+ * browser. An administrator must approve the request before the requester can
+ * set a new password.
+ */
+export async function requestPasswordResetNoEmail(email: string) {
+  const client = requireSupabase();
+  const { data, error } = await client.functions.invoke("password-reset", {
+    body: { action: "request", email },
+  });
+  if (error) throw error;
+  if (!data?.requestId || !data?.resetToken) throw new Error("Unable to create password reset request.");
+  return data as { requestId: string; resetToken: string; status: "pending" };
+}
+
+export async function checkPasswordResetStatus(requestId: string, resetToken: string) {
+  const client = requireSupabase();
+  const { data, error } = await client.functions.invoke("password-reset", {
+    body: { action: "status", requestId, resetToken },
+  });
+  if (error) throw error;
+  return data as { status: "pending" | "approved" | "rejected" | "completed"; expiresAt?: string | null };
+}
+
+export async function completePasswordReset(requestId: string, resetToken: string, newPassword: string) {
+  const client = requireSupabase();
+  const { data, error } = await client.functions.invoke("password-reset", {
+    body: { action: "complete", requestId, resetToken, newPassword },
+  });
+  if (error) throw error;
+  if (!data?.ok) throw new Error(data?.message || "Unable to update password.");
+  return data as { ok: true };
+}
+
+export async function fetchPasswordResetRequests(): Promise<CloudPasswordResetRequest[]> {
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from("password_reset_requests")
+    .select("id,user_id,email,status,requested_at,approved_at,approved_by,completed_at,expires_at")
+    .order("requested_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map(passwordResetFromRow);
+}
+
+export async function updatePasswordResetRequestStatus(id: string, status: "approved" | "rejected") {
+  const client = requireSupabase();
+  const { data: userData, error: userError } = await client.auth.getUser();
+  if (userError) throw userError;
+  if (!userData.user) throw new Error("Administrator session not found.");
+
+  const patch: Record<string, any> = {
+    status,
+    approved_by: userData.user.id,
+    approved_at: new Date().toISOString(),
+  };
+  const { data, error } = await client
+    .from("password_reset_requests")
+    .update(patch)
+    .eq("id", id)
+    .select("id,user_id,email,status,requested_at,approved_at,approved_by,completed_at,expires_at")
+    .single();
+  if (error) throw error;
+  return passwordResetFromRow(data);
 }
 
 export async function fetchMyProfile(userId?: string): Promise<CloudProfile | null> {
