@@ -967,8 +967,9 @@ export default function App() {
 
   function openApprovalEmailDraft(vessel: Vessel, study: SSCSStudy) {
     const recipient = users.find(user => user.id === study.initiatedById)?.email?.trim() ?? "";
+    const ccRecipient = ((import.meta.env.VITE_EMAILJS_CC_EMAIL as string | undefined)?.trim() || "pttlng-marinelmpt2@pttlng.com");
     const { subject, body } = buildApprovalEmailDraft(vessel, study);
-    const mailto = `mailto:${encodeURIComponent(recipient)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    const mailto = `mailto:${encodeURIComponent(recipient)}?cc=${encodeURIComponent(ccRecipient)}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
     window.location.href = mailto;
   }
 

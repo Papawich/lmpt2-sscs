@@ -4,7 +4,8 @@ import emailjs from "@emailjs/browser";
 // Set these in your project's environment variables:
 //   VITE_EMAILJS_SERVICE_ID   — your EmailJS Service ID
 //   VITE_EMAILJS_PUBLIC_KEY   — your EmailJS Public (User) Key
-//   VITE_EMAILJS_TEMPLATE_ID  — a template with: {{to_email}}, {{subject}}, {{message}}
+//   VITE_EMAILJS_TEMPLATE_ID  — a template with: {{to_email}}, {{title}}, {{message}}, {{cc_email}}
+//   VITE_EMAILJS_CC_EMAIL      — workflow CC recipient (OTP/security emails are excluded)
 
 const SERVICE_ID  = ((import.meta.env.VITE_EMAILJS_SERVICE_ID as string | undefined)?.trim() || "service_9f81sqq") as string | undefined;
 const PUBLIC_KEY  = ((import.meta.env.VITE_EMAILJS_PUBLIC_KEY as string | undefined)?.trim() || "AAzjcb2oDP4JGVqnb") as string | undefined;
@@ -12,14 +13,29 @@ const TEMPLATE_ID = ((import.meta.env.VITE_EMAILJS_TEMPLATE_ID as string | undef
 
 const configured = !!(SERVICE_ID && PUBLIC_KEY && TEMPLATE_ID);
 
-export const adminNotificationEmails = ((import.meta.env.VITE_ADMIN_NOTIFICATION_EMAILS as string | undefined) ?? "")
+export const workflowCcEmail = ((import.meta.env.VITE_EMAILJS_CC_EMAIL as string | undefined)?.trim() || "pttlng-marinelmpt2@pttlng.com");
+
+const configuredAdminEmails = ((import.meta.env.VITE_ADMIN_NOTIFICATION_EMAILS as string | undefined) ?? "")
   .split(",")
   .map(v => v.trim())
   .filter(Boolean);
 
-async function send(toEmail: string, subject: string, message: string, fromName = "LMPT2 SSCS System"): Promise<void> {
+// Narudech must always receive admin registration notifications in addition to
+// any recipients configured in VITE_ADMIN_NOTIFICATION_EMAILS.
+export const adminNotificationEmails = Array.from(new Set([
+  ...configuredAdminEmails,
+  "narudech.s@pttlng.com",
+]));
+
+async function send(
+  toEmail: string,
+  subject: string,
+  message: string,
+  fromName = "LMPT2 SSCS System",
+  includeWorkflowCc = true,
+): Promise<void> {
   if (!configured) {
-    console.info("[LMPT2 Email — not configured]", { toEmail, subject, message });
+    console.info("[LMPT2 Email — not configured]", { toEmail, ccEmail: includeWorkflowCc ? workflowCcEmail : "", subject, message });
     return;
   }
   try {
@@ -27,11 +43,12 @@ async function send(toEmail: string, subject: string, message: string, fromName 
       SERVICE_ID!,
       TEMPLATE_ID!,
       {
-        to_email: toEmail,   // → To Email field (must be {{to_email}} in template)
-        title:    subject,   // → Subject: "Contact Us: {{title}}"
-        name:     fromName,  // → From Name: {{name}}, and shown in content
-        email:    toEmail,   // → Reply To: {{email}}
-        message,             // → Content: {{message}}
+        to_email: toEmail,                                      // → To Email: {{to_email}}
+        cc_email: includeWorkflowCc ? workflowCcEmail : "",     // → Cc: {{cc_email}}
+        title:    subject,                                      // → Subject: {{title}}
+        name:     fromName,                                     // → From Name: {{name}}
+        email:    toEmail,                                      // → Reply To: {{email}}
+        message,                                                // → Content: {{message}}
       },
       PUBLIC_KEY!,
     );
@@ -192,6 +209,7 @@ export async function sendOTPEmail(opts: {
     "Your LMPT2 SSCS Verification Code",
     `Hello ${opts.userName},\n\nYour one-time verification code is:\n\n${opts.otp}\n\nThis code is valid for this session only. Do not share it with anyone.\n\nIf you did not request this, please ignore this email.`,
     "LMPT2 SSCS — Verification",
+    false, // Never CC authentication codes to a shared mailbox.
   );
 }
 
