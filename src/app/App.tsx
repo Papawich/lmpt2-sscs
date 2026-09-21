@@ -27,6 +27,9 @@ import {
   signUp as cloudSignUp,
   signOut as cloudSignOut,
   sendPasswordReset,
+  verifyPasswordRecoveryOtp,
+  updatePassword,
+  onAuthStateChange,
   fetchMyProfile,
   fetchProfiles,
   updateProfileStatus,
@@ -244,6 +247,7 @@ type AccountStatus  = "pending" | "approved" | "rejected";
 type StudyStatus    = "access_requested" | "access_rejected" | "draft" | "submitted" | "approved" | "edit_requested" | "editing";
 type Page           = "login" | "register" | "forgot" | "home" | "vessel" | "study" | "admin";
 type RegStep        = "form" | "otp" | "submitted";
+type ForgotStep     = "email" | "otp" | "password" | "done";
 type AdminTab       = "pending" | "approved" | "rejected" | "all";
 
 interface UserAccount {
@@ -630,9 +634,15 @@ export default function App() {
   const [otpSending, setOtpSending] = useState(false);
   const [otpErr, setOtpErr]         = useState("");
 
-  // ── Forgot state ─────────────────────────────────────────────────────────────
-  const [forgotEmail, setForgotEmail] = useState("");
-  const [forgotSent, setForgotSent]   = useState(false);
+  // ── Forgot password / recovery OTP state ─────────────────────────────────────
+  const [forgotEmail, setForgotEmail]       = useState("");
+  const [forgotStep, setForgotStep]         = useState<ForgotStep>("email");
+  const [forgotOtp, setForgotOtp]           = useState("");
+  const [forgotNewPw, setForgotNewPw]       = useState("");
+  const [forgotConfirmPw, setForgotConfirmPw] = useState("");
+  const [forgotErr, setForgotErr]           = useState("");
+  const [forgotLoading, setForgotLoading]   = useState(false);
+  const [showForgotPw, setShowForgotPw]     = useState(false);
 
   // ── Search state ─────────────────────────────────────────────────────────────
   const [searchQuery, setSearchQuery]     = useState("");
@@ -726,6 +736,32 @@ export default function App() {
       cancelled = true;
       Object.values(studySaveTimers.current).forEach(clearTimeout);
     };
+  }, []);
+
+  // Supabase recovery links still work as a fallback. If a valid recovery link is
+  // opened, Supabase emits PASSWORD_RECOVERY and we show the new-password form.
+  // The primary flow below uses a 6-digit recovery OTP to avoid corporate email
+  // link scanners consuming one-time reset links before the user clicks them.
+  useEffect(() => {
+    if (!supabaseConfigured) return;
+    const { data } = onAuthStateChange((event, session) => {
+      if (event === "PASSWORD_RECOVERY" && session) {
+        setForgotErr("");
+        setForgotStep("password");
+        setPage("forgot");
+      }
+    });
+    return () => data.subscription.unsubscribe();
+  }, []);
+
+  // Show a useful message for old/expired recovery links and remove the error
+  // parameters from the address bar so they do not keep reappearing.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("error_code") === "otp_expired") {
+      setLoginErr("That password reset link is invalid or expired. Use Forgot password to request a new 6-digit recovery code.");
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
   }, []);
 
   useEffect(() => {
@@ -871,16 +907,89 @@ export default function App() {
     }
   }
 
+  async function sendForgotRecoveryOtp() {
+    setForgotErr("");
+    if (!forgotEmail.includes("@")) {
+      setForgotErr("Enter a valid registered email address.");
+      return;
+    }
+    if (!supabaseConfigured) {
+      setForgotErr("Password recovery requires Supabase to be configured.");
+      return;
+    }
+    setForgotLoading(true);
+    try {
+      await sendPasswordReset(forgotEmail.trim());
+      setForgotOtp("");
+      setForgotStep("otp");
+    } catch (err) {
+      console.error("[Password recovery OTP send failed]", err);
+      setForgotErr(err instanceof Error ? err.message : "Unable to send recovery code.");
+    } finally {
+      setForgotLoading(false);
+    }
+  }
+
   async function handleForgotPassword(e: React.FormEvent) {
     e.preventDefault();
-    if (!forgotEmail.includes("@")) return;
-    try {
-      if (supabaseConfigured) await sendPasswordReset(forgotEmail.trim());
-      setForgotSent(true);
-    } catch (err) {
-      console.error("[Password reset failed]", err);
-      showToast(err instanceof Error ? err.message : "Unable to send reset email.", "error");
+    await sendForgotRecoveryOtp();
+  }
+
+  async function handleVerifyRecoveryOtp(e: React.FormEvent) {
+    e.preventDefault();
+    setForgotErr("");
+    const token = forgotOtp.replace(/\s/g, "");
+    if (!/^\d{6}$/.test(token)) {
+      setForgotErr("Enter the 6-digit recovery code from your email.");
+      return;
     }
+    setForgotLoading(true);
+    try {
+      await verifyPasswordRecoveryOtp(forgotEmail.trim(), token);
+      setForgotNewPw("");
+      setForgotConfirmPw("");
+      setForgotStep("password");
+    } catch (err) {
+      console.error("[Password recovery OTP verify failed]", err);
+      setForgotErr(err instanceof Error ? err.message : "Invalid or expired recovery code.");
+    } finally {
+      setForgotLoading(false);
+    }
+  }
+
+  async function handleSetNewPassword(e: React.FormEvent) {
+    e.preventDefault();
+    setForgotErr("");
+    if (forgotNewPw.length < 8) {
+      setForgotErr("Password must be at least 8 characters.");
+      return;
+    }
+    if (forgotNewPw !== forgotConfirmPw) {
+      setForgotErr("Passwords do not match.");
+      return;
+    }
+    setForgotLoading(true);
+    try {
+      await updatePassword(forgotNewPw);
+      await cloudSignOut();
+      setForgotStep("done");
+    } catch (err) {
+      console.error("[Password update failed]", err);
+      setForgotErr(err instanceof Error ? err.message : "Unable to update password.");
+    } finally {
+      setForgotLoading(false);
+    }
+  }
+
+  function resetForgot() {
+    setForgotEmail("");
+    setForgotStep("email");
+    setForgotOtp("");
+    setForgotNewPw("");
+    setForgotConfirmPw("");
+    setForgotErr("");
+    setForgotLoading(false);
+    setShowForgotPw(false);
   }
 
   function resetReg() {
@@ -1262,7 +1371,7 @@ export default function App() {
             <Field label="Password" value={loginPw} onChange={setLoginPw} type={showLoginPw ? "text" : "password"} placeholder="••••••••" icon={Lock}
               trailing={<button type="button" onClick={() => setShowLoginPw(!showLoginPw)} className="text-muted-foreground hover:text-foreground transition-colors">{showLoginPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}</button>} />
             <div className="flex justify-end">
-              <button type="button" onClick={() => { setForgotSent(false); setForgotEmail(""); setPage("forgot"); }}
+              <button type="button" onClick={() => { resetForgot(); setPage("forgot"); }}
                 className="text-xs font-mono text-muted-foreground hover:text-primary transition-colors">Forgot password?</button>
             </div>
             <button type="submit" disabled={loginLoading}
@@ -1390,26 +1499,83 @@ export default function App() {
   );
 
   // ─────────────────────────────────────────────────────────────────────────
-  // FORGOT PAGE
+  // FORGOT PASSWORD — SUPABASE RECOVERY OTP
   // ─────────────────────────────────────────────────────────────────────────
   if (page === "forgot") return (
     <div className="min-h-screen bg-background flex items-center justify-center p-6 relative overflow-hidden" style={font}>
       <GridBg />
       <div className="w-full max-w-sm relative z-10">
-        <button onClick={() => setPage("login")} className="flex items-center gap-2 text-xs font-mono text-muted-foreground hover:text-foreground transition-colors mb-8"><ArrowLeft className="w-3.5 h-3.5" />Back to Sign In</button>
+        <button onClick={() => { resetForgot(); setPage("login"); }} className="flex items-center gap-2 text-xs font-mono text-muted-foreground hover:text-foreground transition-colors mb-8"><ArrowLeft className="w-3.5 h-3.5" />Back to Sign In</button>
         <div className="mb-8"><Logo /></div>
-        <div className="mb-8"><h2 className="font-mono text-xl font-bold text-foreground tracking-wide mb-1">RESET PASSWORD</h2><p className="text-sm text-muted-foreground">Enter your registered email.</p></div>
-        {forgotSent
-          ? <div className="p-5 rounded border border-emerald-500/30 bg-emerald-500/5 flex flex-col items-center gap-3 text-center">
-              <CheckCircle2 className="w-10 h-10 text-emerald-400" />
-              <div><p className="font-mono font-semibold text-foreground text-sm">Reset Link Sent</p><p className="text-xs text-muted-foreground mt-1">Check your inbox at <span className="font-mono text-foreground">{forgotEmail}</span></p></div>
-              <button onClick={() => setPage("login")} className="text-xs font-mono text-primary hover:text-primary/80 mt-2">Return to Sign In →</button>
-            </div>
-          : <form onSubmit={handleForgotPassword} className="space-y-4">
+
+        {forgotStep === "email" && (
+          <>
+            <div className="mb-8"><h2 className="font-mono text-xl font-bold text-foreground tracking-wide mb-1">RESET PASSWORD</h2><p className="text-sm text-muted-foreground">Enter your registered email. We will send a 6-digit recovery code.</p></div>
+            <form onSubmit={handleForgotPassword} className="space-y-4">
+              {forgotErr && <div className="flex items-start gap-2.5 p-3 rounded bg-destructive/10 border border-destructive/30 text-destructive text-sm"><AlertCircle className="w-4 h-4 mt-0.5 shrink-0" /><span>{forgotErr}</span></div>}
               <Field label="Registered Email" value={forgotEmail} onChange={setForgotEmail} type="email" placeholder="you@company.com" icon={Mail} />
-              <button type="submit" className="w-full bg-primary text-primary-foreground font-mono font-semibold text-sm tracking-widest uppercase py-2.5 rounded hover:bg-primary/90 transition-all flex items-center justify-center gap-2">Send Reset Link<ChevronRight className="w-4 h-4" /></button>
-            </form>}
+              <button type="submit" disabled={forgotLoading} className="w-full bg-primary text-primary-foreground font-mono font-semibold text-sm tracking-widest uppercase py-2.5 rounded hover:bg-primary/90 transition-all flex items-center justify-center gap-2 disabled:opacity-60">
+                {forgotLoading ? <><RefreshCw className="w-4 h-4 animate-spin" />Sending…</> : <>Send Recovery Code<ChevronRight className="w-4 h-4" /></>}
+              </button>
+            </form>
+          </>
+        )}
+
+        {forgotStep === "otp" && (
+          <>
+            <div className="mb-8"><h2 className="font-mono text-xl font-bold text-foreground tracking-wide mb-1">VERIFY RECOVERY CODE</h2><p className="text-sm text-muted-foreground">Enter the 6-digit code sent to <span className="font-mono text-foreground">{forgotEmail}</span>.</p></div>
+            <form onSubmit={handleVerifyRecoveryOtp} className="space-y-4">
+              {forgotErr && <div className="flex items-start gap-2.5 p-3 rounded bg-destructive/10 border border-destructive/30 text-destructive text-sm"><AlertCircle className="w-4 h-4 mt-0.5 shrink-0" /><span>{forgotErr}</span></div>}
+              <div className="space-y-1.5">
+                <label className="font-mono text-xs text-muted-foreground uppercase tracking-widest">6-Digit Recovery Code</label>
+                <div className="relative">
+                  <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                  <input
+                    value={forgotOtp}
+                    onChange={e => setForgotOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    placeholder="000000"
+                    className="w-full bg-input-background border border-border rounded pl-10 pr-3 py-2.5 text-sm font-mono tracking-[0.35em] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/20"
+                  />
+                </div>
+              </div>
+              <button type="submit" disabled={forgotLoading || forgotOtp.length !== 6} className="w-full bg-primary text-primary-foreground font-mono font-semibold text-sm tracking-widest uppercase py-2.5 rounded hover:bg-primary/90 transition-all flex items-center justify-center gap-2 disabled:opacity-60">
+                {forgotLoading ? <><RefreshCw className="w-4 h-4 animate-spin" />Verifying…</> : <>Verify Code<ChevronRight className="w-4 h-4" /></>}
+              </button>
+              <div className="flex items-center justify-between pt-1">
+                <button type="button" onClick={() => { setForgotErr(""); setForgotStep("email"); }} className="text-xs font-mono text-muted-foreground hover:text-primary">Change email</button>
+                <button type="button" disabled={forgotLoading} onClick={() => void sendForgotRecoveryOtp()} className="text-xs font-mono text-primary hover:text-primary/80 disabled:opacity-50">Resend code</button>
+              </div>
+            </form>
+          </>
+        )}
+
+        {forgotStep === "password" && (
+          <>
+            <div className="mb-8"><h2 className="font-mono text-xl font-bold text-foreground tracking-wide mb-1">SET NEW PASSWORD</h2><p className="text-sm text-muted-foreground">Choose a new password for your account.</p></div>
+            <form onSubmit={handleSetNewPassword} className="space-y-4">
+              {forgotErr && <div className="flex items-start gap-2.5 p-3 rounded bg-destructive/10 border border-destructive/30 text-destructive text-sm"><AlertCircle className="w-4 h-4 mt-0.5 shrink-0" /><span>{forgotErr}</span></div>}
+              <Field label="New Password" value={forgotNewPw} onChange={setForgotNewPw} type={showForgotPw ? "text" : "password"} placeholder="Minimum 8 characters" icon={Lock}
+                trailing={<button type="button" onClick={() => setShowForgotPw(v => !v)} className="text-muted-foreground hover:text-foreground transition-colors">{showForgotPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}</button>} />
+              <Field label="Confirm New Password" value={forgotConfirmPw} onChange={setForgotConfirmPw} type={showForgotPw ? "text" : "password"} placeholder="Repeat new password" icon={Lock} />
+              <button type="submit" disabled={forgotLoading} className="w-full bg-primary text-primary-foreground font-mono font-semibold text-sm tracking-widest uppercase py-2.5 rounded hover:bg-primary/90 transition-all flex items-center justify-center gap-2 disabled:opacity-60">
+                {forgotLoading ? <><RefreshCw className="w-4 h-4 animate-spin" />Updating…</> : <>Update Password<CheckCircle2 className="w-4 h-4" /></>}
+              </button>
+            </form>
+          </>
+        )}
+
+        {forgotStep === "done" && (
+          <div className="p-5 rounded border border-emerald-500/30 bg-emerald-500/5 flex flex-col items-center gap-3 text-center">
+            <CheckCircle2 className="w-10 h-10 text-emerald-400" />
+            <div><p className="font-mono font-semibold text-foreground text-sm">Password Updated</p><p className="text-xs text-muted-foreground mt-1">Your new password is ready to use.</p></div>
+            <button onClick={() => { resetForgot(); setPage("login"); }} className="text-xs font-mono text-primary hover:text-primary/80 mt-2">Return to Sign In →</button>
+          </div>
+        )}
       </div>
+      {toast && <Toast {...toast} />}
     </div>
   );
 
