@@ -13,14 +13,32 @@ export interface PneumaticData extends SSLSystemData {
   airPressure: string;
 }
 
+export type OpticalSignalOption = "" | "Telephon Chanel" | "ESD Chanel" | "Spare";
+export type OpticalDirectionOption = "" | "Ship to Shore" | "Shore to Ship" | "Spare";
+
+export interface OpticalSignalArrangementRow {
+  shipSideSignal: OpticalSignalOption;
+  shipSideDirection: OpticalDirectionOption;
+}
+
+export interface ElectricSignalArrangementRow {
+  shoreSide: string;
+  shipPinNo: string;
+  shipSide: string;
+}
+
 export interface ShipShoreLinkData {
   opticalFibre: SSLSystemData;
   electric: SSLSystemData;
   pneumatic: PneumaticData;
   esd1Items: string[];
+  opticalSignalArrangement: OpticalSignalArrangementRow[];
+  electricSignalArrangement: ElectricSignalArrangementRow[];
 }
 
 const ESD1_COUNT = 15;
+const OPTICAL_SIGNAL_COUNT = 6;
+const ELECTRIC_SIGNAL_COUNT = 19;
 
 function defaultSSLSystem(): SSLSystemData {
   return { manufacturer: "", connectionType: "", boxDistance: "", boxDirection: "" };
@@ -30,12 +48,29 @@ function defaultPneumatic(): PneumaticData {
   return { manufacturer: "", connectionType: "", boxDistance: "", boxDirection: "", airPressure: "" };
 }
 
+function defaultOpticalSignalArrangement(): OpticalSignalArrangementRow[] {
+  return Array.from({ length: OPTICAL_SIGNAL_COUNT }, () => ({
+    shipSideSignal: "",
+    shipSideDirection: "",
+  }));
+}
+
+function defaultElectricSignalArrangement(): ElectricSignalArrangementRow[] {
+  return ELECTRIC_SHORE_SIDE_ROWS.map(row => ({
+    shoreSide: row.shoreSide,
+    shipPinNo: "",
+    shipSide: "",
+  }));
+}
+
 export function defaultShipShoreLinkData(): ShipShoreLinkData {
   return {
     opticalFibre: defaultSSLSystem(),
     electric: defaultSSLSystem(),
     pneumatic: defaultPneumatic(),
     esd1Items: Array(ESD1_COUNT).fill(""),
+    opticalSignalArrangement: defaultOpticalSignalArrangement(),
+    electricSignalArrangement: defaultElectricSignalArrangement(),
   };
 }
 
@@ -151,6 +186,196 @@ function SystemForm<T extends SSLSystemData>({
   );
 }
 
+// ─── Signal arrangement tables ────────────────────────────────────────────────
+
+const OPTICAL_SHORE_SIDE_ROWS = [
+  { ferrule: "1", signal: "Telephone Channel", direction: "Ship > Shore" },
+  { ferrule: "2", signal: "Telephone Channel", direction: "Shore > Ship" },
+  { ferrule: "3", signal: "ESD Channel",       direction: "Ship > Shore" },
+  { ferrule: "4", signal: "ESD Channel",       direction: "Shore > Ship" },
+  { ferrule: "5", signal: "Spare",             direction: "Ship > Shore" },
+  { ferrule: "6", signal: "Spare",             direction: "Shore > Ship" },
+] as const;
+
+const ELECTRIC_SHORE_SIDE_ROWS = [
+  { pin: "1,2",      shoreSide: "NOT USED" },
+  { pin: "3,4",      shoreSide: "SPARE" },
+  { pin: "5,6",      shoreSide: "ELEC TEL HOT PHONE" },
+  { pin: "7,8",      shoreSide: "ELEC TEL PUBLIC PHONE" },
+  { pin: "9,10",     shoreSide: "ELEC TEL PLANT PHONE (PABX)" },
+  { pin: "11,12",    shoreSide: "NOT USED" },
+  { pin: "13,14",    shoreSide: "SHORE TO SHIP ESD" },
+  { pin: "15,16",    shoreSide: "SHIP TO SHORE ESD" },
+  { pin: "17,18",    shoreSide: "UMBILICAL CONTINUITY LINK" },
+  { pin: "19,20",    shoreSide: "UMBILICAL CONTINUITY LINK" },
+  { pin: "21,22",    shoreSide: "SPARE" },
+  { pin: "23,24",    shoreSide: "SPARE" },
+  { pin: "25,26",    shoreSide: "SPARE" },
+  { pin: "27,28",    shoreSide: "SPARE" },
+  { pin: "29,30",    shoreSide: "IS POWER FOR SHORE ETU" },
+  { pin: "31,32,33", shoreSide: "RS232 INTERFACE (FOR MLM)" },
+  { pin: "34",       shoreSide: "RS232 INTERFACE (FOR MLM)" },
+  { pin: "35,36",    shoreSide: "RESERVED FOR SHIP ETU" },
+  { pin: "37",       shoreSide: "SPARE" },
+] as const;
+
+const OPTICAL_SIGNAL_OPTIONS: OpticalSignalOption[] = ["", "Telephon Chanel", "ESD Chanel", "Spare"];
+const OPTICAL_DIRECTION_OPTIONS: OpticalDirectionOption[] = ["", "Ship to Shore", "Shore to Ship", "Spare"];
+
+function OpticalSignalArrangementTable({
+  rows,
+  canEdit,
+  onChange,
+}: {
+  rows: OpticalSignalArrangementRow[];
+  canEdit: boolean;
+  onChange: (rows: OpticalSignalArrangementRow[]) => void;
+}) {
+  const updateSignal = (index: number, value: OpticalSignalOption) => {
+    onChange(rows.map((row, i) => i === index ? { ...row, shipSideSignal: value } : row));
+  };
+
+  const updateDirection = (index: number, value: OpticalDirectionOption) => {
+    onChange(rows.map((row, i) => i === index ? { ...row, shipSideDirection: value } : row));
+  };
+
+  return (
+    <div className="px-5 pb-5">
+      <div className="font-mono text-xs font-bold italic text-foreground mb-2">
+        Table 1. Optical Fiber System Signal Arrangement (Shore Side / Ship Side)
+      </div>
+      <div className="overflow-x-auto border border-border rounded">
+        <table className="w-full min-w-[780px] text-xs border-collapse">
+          <thead>
+            <tr className="bg-secondary/40 border-b border-border">
+              <th rowSpan={2} className="px-3 py-2 text-center font-mono font-bold border-r border-border w-24">Ferrule No.</th>
+              <th colSpan={2} className="px-3 py-2 text-center font-mono font-bold border-r border-border">Shore Side</th>
+              <th colSpan={2} className="px-3 py-2 text-center font-mono font-bold">Ship Side</th>
+            </tr>
+            <tr className="bg-secondary/30 border-b border-border">
+              <th className="px-3 py-2 text-center font-mono font-bold border-r border-border">Signal</th>
+              <th className="px-3 py-2 text-center font-mono font-bold border-r border-border">Direction</th>
+              <th className="px-3 py-2 text-center font-mono font-bold border-r border-border">Signal</th>
+              <th className="px-3 py-2 text-center font-mono font-bold">Direction</th>
+            </tr>
+          </thead>
+          <tbody>
+            {OPTICAL_SHORE_SIDE_ROWS.map((shore, i) => {
+              const row = rows[i] ?? { shipSideSignal: "", shipSideDirection: "" };
+              return (
+                <tr key={shore.ferrule} className="border-b border-border last:border-0">
+                  <td className="px-3 py-2 text-center font-mono font-bold border-r border-border bg-secondary/20">{shore.ferrule}</td>
+                  <td className="px-3 py-2 font-mono border-r border-border">{shore.signal}</td>
+                  <td className="px-3 py-2 font-mono border-r border-border">{shore.direction}</td>
+                  <td className="px-2 py-1.5 border-r border-border">
+                    {canEdit ? (
+                      <select
+                        value={row.shipSideSignal}
+                        onChange={e => updateSignal(i, e.target.value as OpticalSignalOption)}
+                        className={yi}
+                      >
+                        {OPTICAL_SIGNAL_OPTIONS.map(option => <option key={option || "blank"} value={option}>{option || "Select..."}</option>)}
+                      </select>
+                    ) : (
+                      <span className={ro}>{row.shipSideSignal || "—"}</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-1.5">
+                    {canEdit ? (
+                      <select
+                        value={row.shipSideDirection}
+                        onChange={e => updateDirection(i, e.target.value as OpticalDirectionOption)}
+                        className={yi}
+                      >
+                        {OPTICAL_DIRECTION_OPTIONS.map(option => <option key={option || "blank"} value={option}>{option || "Select..."}</option>)}
+                      </select>
+                    ) : (
+                      <span className={ro}>{row.shipSideDirection || "—"}</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ElectricSignalArrangementTable({
+  rows,
+  canEdit,
+  onChange,
+}: {
+  rows: ElectricSignalArrangementRow[];
+  canEdit: boolean;
+  onChange: (rows: ElectricSignalArrangementRow[]) => void;
+}) {
+  const update = (index: number, key: keyof ElectricSignalArrangementRow, value: string) => {
+    onChange(rows.map((row, i) => i === index ? { ...row, [key]: value } : row));
+  };
+
+  return (
+    <div className="px-5 pb-5">
+      <div className="font-mono text-xs font-bold italic text-foreground mb-2">
+        Table 2. Electric System Signal Arrangement (Shore Side / Ship Side)
+      </div>
+      <div className="overflow-x-auto border border-border rounded">
+        <table className="w-full min-w-[760px] text-xs border-collapse">
+          <thead>
+            <tr className="bg-secondary/40 border-b border-border">
+              <th className="px-3 py-2 text-center font-mono font-bold border-r border-border w-24">Pin No.</th>
+              <th className="px-3 py-2 text-center font-mono font-bold border-r border-border">Shore Side</th>
+              <th className="px-3 py-2 text-center font-mono font-bold border-r border-border w-24">Pin No.</th>
+              <th className="px-3 py-2 text-center font-mono font-bold">Ship Side</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ELECTRIC_SHORE_SIDE_ROWS.map((shore, i) => {
+              const row = rows[i] ?? { shoreSide: shore.shoreSide, shipPinNo: "", shipSide: "" };
+              return (
+                <tr key={shore.pin} className="border-b border-border last:border-0">
+                  <td className="px-3 py-2 text-center font-mono font-bold border-r border-border bg-secondary/20">{shore.pin}</td>
+                  <td className="px-3 py-2 font-mono border-r border-border bg-secondary/10">
+                    {shore.shoreSide}
+                  </td>
+                  <td className="px-2 py-1.5 border-r border-border">
+                    {canEdit ? (
+                      <input
+                        type="text"
+                        value={row.shipPinNo}
+                        onChange={e => update(i, "shipPinNo", e.target.value)}
+                        placeholder="Enter ship pin no."
+                        className={yi}
+                      />
+                    ) : (
+                      <span className={ro}>{row.shipPinNo || "—"}</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-1.5">
+                    {canEdit ? (
+                      <input
+                        type="text"
+                        value={row.shipSide}
+                        onChange={e => update(i, "shipSide", e.target.value)}
+                        placeholder="Enter ship-side signal / function"
+                        className={yi}
+                      />
+                    ) : (
+                      <span className={ro}>{row.shipSide || "—"}</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 type SubTab = "optical_fibre" | "electric" | "pneumatic" | "esd1";
@@ -169,6 +394,15 @@ export function ShipShoreLinkSection({ canEdit, data: dataProp, onChange }: Prop
   const el_ = data.electric    ?? defaultSSLSystem();
   const pn_ = data.pneumatic   ?? defaultPneumatic();
   const esd = data.esd1Items?.length === ESD1_COUNT ? data.esd1Items : Array(ESD1_COUNT).fill("");
+  const opticalSignals = data.opticalSignalArrangement?.length === OPTICAL_SIGNAL_COUNT
+    ? data.opticalSignalArrangement
+    : defaultOpticalSignalArrangement();
+  const electricSignals = data.electricSignalArrangement?.length === ELECTRIC_SIGNAL_COUNT
+    ? data.electricSignalArrangement.map((row, i) => ({
+        ...row,
+        shoreSide: ELECTRIC_SHORE_SIDE_ROWS[i]?.shoreSide ?? row.shoreSide ?? "",
+      }))
+    : defaultElectricSignalArrangement();
 
   const sysComplete = (s: SSLSystemData) =>
     !!s.manufacturer && !!s.connectionType && !!s.boxDistance && !!s.boxDirection;
@@ -211,20 +445,34 @@ export function ShipShoreLinkSection({ canEdit, data: dataProp, onChange }: Prop
 
       {/* ── Optical Fibre System ── */}
       {subTab === "optical_fibre" && (
-        <SystemForm
-          data={of_}
-          canEdit={canEdit}
-          onChange={d => onChange({ ...data, opticalFibre: d })}
-        />
+        <>
+          <SystemForm
+            data={of_}
+            canEdit={canEdit}
+            onChange={d => onChange({ ...data, opticalFibre: d })}
+          />
+          <OpticalSignalArrangementTable
+            rows={opticalSignals}
+            canEdit={canEdit}
+            onChange={rows => onChange({ ...data, opticalSignalArrangement: rows })}
+          />
+        </>
       )}
 
       {/* ── Electric System ── */}
       {subTab === "electric" && (
-        <SystemForm
-          data={el_}
-          canEdit={canEdit}
-          onChange={d => onChange({ ...data, electric: d })}
-        />
+        <>
+          <SystemForm
+            data={el_}
+            canEdit={canEdit}
+            onChange={d => onChange({ ...data, electric: d })}
+          />
+          <ElectricSignalArrangementTable
+            rows={electricSignals}
+            canEdit={canEdit}
+            onChange={rows => onChange({ ...data, electricSignalArrangement: rows })}
+          />
+        </>
       )}
 
       {/* ── Pneumatic System ── */}
