@@ -95,6 +95,12 @@ import {
   isAttachmentComplete,
 } from "./components/AttachmentsSection";
 import type { AttachmentData } from "./components/AttachmentsSection";
+import {
+  QualityAssessmentSection,
+  defaultQualityAssessmentData,
+  isQualityAssessmentComplete,
+} from "./components/QualityAssessmentSection";
+import type { QualityAssessmentData } from "./components/QualityAssessmentSection";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VESSELS
@@ -226,6 +232,7 @@ const CHECKLIST_TEMPLATE: { section: string; items: TemplateItem[] }[] = [
   { section: "Short Distance Pieces (SDPs)",   items: [] },
   { section: "Utility System",                  items: [] },
   { section: "Attachment",                      items: [] },
+  { section: "Quality Assessment",               items: [] },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -273,6 +280,7 @@ interface SSCSStudy {
   utilityData: UtilityData;
   requiredDocuments: RequiredDocumentsData;
   attachmentData: AttachmentData;
+  qualityAssessmentData: QualityAssessmentData;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -301,6 +309,7 @@ const CLOUD_STUDY_DEFAULTS: Record<string, () => any> = {
   utilityData: defaultUtilityData,
   requiredDocuments: defaultRequiredDocumentsData,
   attachmentData: defaultAttachmentData,
+  qualityAssessmentData: defaultQualityAssessmentData,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -349,6 +358,7 @@ function blankStudy(vessel: Vessel, user: UserAccount, prev?: SSCSStudy, initial
     utilityData: prev?.utilityData ?? defaultUtilityData(),
     requiredDocuments: prev?.requiredDocuments ?? defaultRequiredDocumentsData(),
     attachmentData: prev?.attachmentData ?? defaultAttachmentData(),
+    qualityAssessmentData: prev?.qualityAssessmentData ?? defaultQualityAssessmentData(),
   };
 }
 
@@ -982,6 +992,11 @@ export default function App() {
   function updateAttachmentData(data: AttachmentData) {
     if (!activeStudy) return;
     syncStudy({ ...activeStudy, attachmentData: data }, supabaseConfigured);
+  }
+
+  function updateQualityAssessmentData(data: QualityAssessmentData) {
+    if (!activeStudy) return;
+    syncStudy({ ...activeStudy, qualityAssessmentData: data });
   }
 
   async function handleDocumentUpload(docKey: string, file: File): Promise<UploadedFile> {
@@ -2269,6 +2284,7 @@ export default function App() {
                 const isUtilityTab     = tab.section === "Utility System";
                 const isReqDocsTab     = tab.section === "Required Documents";
                 const isAttachmentTab  = tab.section === "Attachment";
+                const isQualityTab     = tab.section === "Quality Assessment";
                 const tabItems = activeStudy.items.filter(i => i.section === tab.section);
                 const filledCount = tabItems.filter(i => i.value && (!i.requiresDoc || i.documentName) && (!i.requiresExpiry || i.expiryDate)).length;
                 const isActive = studyTab === tab.section;
@@ -2277,6 +2293,8 @@ export default function App() {
                   ? isRequiredDocumentsComplete(activeStudy.requiredDocuments)
                   : isAttachmentTab
                   ? isAttachmentComplete(activeStudy.attachmentData)
+                  : isQualityTab
+                  ? isQualityAssessmentComplete(activeStudy.qualityAssessmentData)
                   : isFenderTab
                   ? isFenderFlatBodyComplete(activeStudy.flatBodyData, activeStudy.fenderReactionData)
                   : isMooringTab
@@ -2297,7 +2315,7 @@ export default function App() {
                   ? isUtilityComplete(activeStudy.utilityData)
                   : tabItems.length > 0 && filledCount === tabItems.length;
 
-                const hasContent = isReqDocsTab || isAttachmentTab || isFenderTab || isMooringTab || isGangwayTab || isUnloadingTab || isCargoMgmtTab || isSSLTab || isCTMSTab || isSDPTab || isUtilityTab || tabItems.length > 0;
+                const hasContent = isReqDocsTab || isAttachmentTab || isQualityTab || isFenderTab || isMooringTab || isGangwayTab || isUnloadingTab || isCargoMgmtTab || isSSLTab || isCTMSTab || isSDPTab || isUtilityTab || tabItems.length > 0;
 
                 return (
                   <button key={tab.section} onClick={() => setStudyTab(tab.section)}
@@ -2347,6 +2365,17 @@ export default function App() {
                   onUploadFile={supabaseConfigured ? handleVesselPhotoUpload : undefined}
                   onDeleteFile={supabaseConfigured ? handleDocumentDelete : undefined}
                   getFileUrl={supabaseConfigured ? handleDocumentDownload : undefined}
+                />
+              );
+            }
+
+            // Quality Assessment — certificate validity and inspection history
+            if (studyTab === "Quality Assessment") {
+              return (
+                <QualityAssessmentSection
+                  canEdit={canEdit}
+                  data={activeStudy.qualityAssessmentData ?? defaultQualityAssessmentData()}
+                  onChange={updateQualityAssessmentData}
                 />
               );
             }
