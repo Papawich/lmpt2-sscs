@@ -99,6 +99,7 @@ import {
   QualityAssessmentSection,
   defaultQualityAssessmentData,
   isQualityAssessmentComplete,
+  getInvalidCertificateCount,
 } from "./components/QualityAssessmentSection";
 import type { QualityAssessmentData } from "./components/QualityAssessmentSection";
 
@@ -558,6 +559,18 @@ function AcctBadge({ status }: { status: AccountStatus }) {
 function StudyBadge({ status }: { status: StudyStatus }) {
   const m = STUDY_META[status];
   return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-semibold tracking-wider uppercase border ${m.color}`}>{m.label}</span>;
+}
+
+function CertificateInvalidBadge({ count }: { count: number }) {
+  return (
+    <span
+      title={`${count} certificate${count === 1 ? "" : "s"} expired`}
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-semibold tracking-wider uppercase border bg-red-500/10 text-red-500 border-red-500/25"
+    >
+      <AlertTriangle className="w-3 h-3" />
+      Certificate Invalid{count > 1 ? ` (${count})` : ""}
+    </span>
+  );
 }
 
 function Toast({ msg, type }: { msg: string; type: "success" | "error" | "info" }) {
@@ -1549,6 +1562,9 @@ export default function App() {
                 </div>
                 {display.map((v, i) => {
                   const study = getLatestStudy(studies, v.id);
+                  const invalidCertificateCount = study
+                    ? getInvalidCertificateCount(study.qualityAssessmentData)
+                    : 0;
                   return (
                     <div key={v.id}
                       className={`w-full grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-4 px-5 py-3.5 items-center hover:bg-secondary/60 transition-colors group ${i < display.length - 1 ? "border-b border-border/50" : ""}`}>
@@ -1558,9 +1574,12 @@ export default function App() {
                         </div>
                         <div className="min-w-0">
                           <p className="text-sm text-foreground font-medium truncate group-hover:text-primary transition-colors">{v.name}</p>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <p className="font-mono text-[10px] text-muted-foreground">{v.imo}</p>
                             {study && <StudyBadge status={study.status} />}
+                            {invalidCertificateCount > 0 && (
+                              <CertificateInvalidBadge count={invalidCertificateCount} />
+                            )}
                           </div>
                         </div>
                       </button>
@@ -1843,6 +1862,30 @@ export default function App() {
     const canKickoff = isShip && study?.status === "approved" && (vesselInactive || expiredItems.length > 0);
     const canInitiate = (isTerminal || isShip) && !study;
 
+    // Vessel Detail should reflect the information entered in the latest SSCS study.
+    // Fall back to the vessel master record only when a General Information field is blank.
+    const studyValue = (itemId: string) =>
+      study?.items.find(item => item.id === itemId)?.value?.trim() ?? "";
+    const detailName           = studyValue("gi-01") || v.name;
+    const detailImo            = studyValue("gi-02") || v.imo;
+    const detailCallSign       = studyValue("gi-03") || v.callSign || "—";
+    const detailFlag           = studyValue("gi-04") || v.flag || "—";
+    const detailPort           = studyValue("gi-05") || v.portOfRegistry || "—";
+    const detailYear           = studyValue("gi-06") || (v.year ? String(v.year) : "—");
+    const detailOwner          = studyValue("gi-07") || v.owner || "—";
+    const detailOperator       = studyValue("gi-08") || v.operator || "—";
+    const detailContainment    = studyValue("gi-09") || v.type || "—";
+    const detailCapacityRaw    = studyValue("gi-10");
+    const detailCapacity       = detailCapacityRaw
+      ? `${detailCapacityRaw}${/m³|m3/i.test(detailCapacityRaw) ? "" : " m³"}`
+      : (v.capacity || "—");
+    const detailClassification = studyValue("gi-11") || v.classification || "—";
+    const detailGas1           = studyValue("gi-12") || v.gasMgmt1 || "";
+    const detailGas2           = studyValue("gi-13") || v.gasMgmt2 || "";
+    const detailGasManagement  = [detailGas1, detailGas2]
+      .filter(value => value && value !== "N/A")
+      .join(" / ") || "—";
+
     return (
       <div className="min-h-screen bg-background" style={font}>
         <NavBar user={currentUser} pendingCount={pendingCount} onAdmin={() => setPage("admin")} onHome={() => setPage("home")} onLogout={handleLogout} />
@@ -1854,31 +1897,31 @@ export default function App() {
             <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
               <div>
                 <div className="flex items-center gap-3 mb-1"><Ship className="w-5 h-5 text-primary" />
-                  <h1 className="text-2xl font-bold text-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{v.name.toUpperCase()}</h1>
+                  <h1 className="text-2xl font-bold text-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{detailName.toUpperCase()}</h1>
                 </div>
-                <p className="font-mono text-xs text-muted-foreground mb-3">{v.imo}</p>
-                <div className="flex items-center gap-2 flex-wrap"><VesselBadge status={v.status} /><span className="font-mono text-xs text-muted-foreground">{v.type}</span></div>
+                <p className="font-mono text-xs text-muted-foreground mb-3">{detailImo}</p>
+                <div className="flex items-center gap-2 flex-wrap"><VesselBadge status={v.status} /><span className="font-mono text-xs text-muted-foreground">{detailContainment}</span></div>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-right shrink-0">
                 {[
-                  { l: "Capacity",         v2: v.capacity },
-                  { l: "Year Built",       v2: String(v.year) },
-                  { l: "IMO",              v2: v.imo },
-                  { l: "Call Sign",        v2: v.callSign || "—" },
-                  { l: "Flag State",       v2: v.flag },
-                  { l: "Port of Registry", v2: v.portOfRegistry || "—" },
+                  { l: "Capacity",         v2: detailCapacity },
+                  { l: "Year Built",       v2: detailYear },
+                  { l: "IMO",              v2: detailImo },
+                  { l: "Call Sign",        v2: detailCallSign },
+                  { l: "Flag State",       v2: detailFlag },
+                  { l: "Port of Registry", v2: detailPort },
                 ].map(({ l, v2 }) => (
                   <div key={l}><p className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest">{l}</p><p className="font-mono text-xs text-foreground">{v2}</p></div>
                 ))}
               </div>
             </div>
-            {(v.owner || v.operator || v.classification || v.gasMgmt1) && (
+            {(detailOwner !== "—" || detailOperator !== "—" || detailClassification !== "—" || detailGasManagement !== "—") && (
               <div className="mt-5 pt-5 border-t border-border grid grid-cols-2 sm:grid-cols-4 gap-3">
                 {[
-                  { l: "Owner",               v2: v.owner          || "—" },
-                  { l: "Operator",            v2: v.operator        || "—" },
-                  { l: "Classification",      v2: v.classification  || "—" },
-                  { l: "Gas Management",      v2: [v.gasMgmt1, v.gasMgmt2].filter(x => x && x !== "N/A").join(" / ") || "—" },
+                  { l: "Owner",               v2: detailOwner },
+                  { l: "Operator",            v2: detailOperator },
+                  { l: "Classification",      v2: detailClassification },
+                  { l: "Gas Management",      v2: detailGasManagement },
                 ].map(({ l, v2 }) => (
                   <div key={l}><p className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest">{l}</p><p className="font-mono text-xs text-foreground">{v2}</p></div>
                 ))}
