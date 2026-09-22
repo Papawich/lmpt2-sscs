@@ -4,7 +4,7 @@ import emailjs from "@emailjs/browser";
 // Set these in your project's environment variables:
 //   VITE_EMAILJS_SERVICE_ID   — your EmailJS Service ID
 //   VITE_EMAILJS_PUBLIC_KEY   — your EmailJS Public (User) Key
-//   VITE_EMAILJS_TEMPLATE_ID  — a template with: {{to_email}}, {{title}}, {{message}}, {{cc_email}}
+//   VITE_EMAILJS_TEMPLATE_ID  — a template with the LMPT2 visual variables documented in EMAILJS_TEMPLATE.html
 //   VITE_EMAILJS_CC_EMAIL      — CC recipient used only for the SSCS Study Approved email
 
 const SERVICE_ID  = ((import.meta.env.VITE_EMAILJS_SERVICE_ID as string | undefined)?.trim() || "service_9f81sqq") as string | undefined;
@@ -36,6 +36,99 @@ function normalizeRecipients(value: string | string[]): string {
     .join(", ");
 }
 
+type EmailVisualTheme = {
+  headerColor: string;
+  headerTint: string;
+  statusLabel: string;
+  categoryLabel: string;
+  actionLabel: string;
+};
+
+function resolveEmailVisualTheme(subject: string): EmailVisualTheme {
+  const value = subject.toLowerCase();
+
+  if (value.includes("verification code")) {
+    return {
+      headerColor: "#4F46E5",
+      headerTint: "#EEF2FF",
+      statusLabel: "VERIFICATION",
+      categoryLabel: "SECURITY",
+      actionLabel: "Open LMPT2 SSCS",
+    };
+  }
+  if (value.includes("rejected")) {
+    return {
+      headerColor: "#DC2626",
+      headerTint: "#FEF2F2",
+      statusLabel: "REJECTED",
+      categoryLabel: "STATUS UPDATE",
+      actionLabel: "Open LMPT2 SSCS",
+    };
+  }
+  if (value.includes("revision")) {
+    return {
+      headerColor: "#EA580C",
+      headerTint: "#FFF7ED",
+      statusLabel: "REVISION REQUIRED",
+      categoryLabel: "ACTION REQUIRED",
+      actionLabel: "Open Study",
+    };
+  }
+  if (value.includes("approved") || value.includes("granted")) {
+    return {
+      headerColor: "#15803D",
+      headerTint: "#F0FDF4",
+      statusLabel: "APPROVED",
+      categoryLabel: "STATUS UPDATE",
+      actionLabel: "Open LMPT2 SSCS",
+    };
+  }
+  if (value.includes("submitted")) {
+    return {
+      headerColor: "#2563EB",
+      headerTint: "#EFF6FF",
+      statusLabel: "SUBMITTED",
+      categoryLabel: "REVIEW REQUIRED",
+      actionLabel: "Review Study",
+    };
+  }
+  if (value.includes("request")) {
+    return {
+      headerColor: "#D97706",
+      headerTint: "#FFFBEB",
+      statusLabel: "ACTION REQUIRED",
+      categoryLabel: "REQUEST",
+      actionLabel: "Review Request",
+    };
+  }
+
+  return {
+    headerColor: "#334155",
+    headerTint: "#F8FAFC",
+    statusLabel: "NOTIFICATION",
+    categoryLabel: "LMPT2 SSCS",
+    actionLabel: "Open LMPT2 SSCS",
+  };
+}
+
+function formatEventTime(): string {
+  try {
+    return new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Bangkok",
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(new Date()) + " ICT";
+  } catch {
+    return new Date().toISOString();
+  }
+}
+
+const appUrl = ((import.meta.env.VITE_APP_URL as string | undefined)?.trim() || "https://lmpt2-sscs.vercel.app");
+
 async function send(
   toEmail: string | string[],
   subject: string,
@@ -53,16 +146,25 @@ async function send(
     return;
   }
   try {
+    const visual = resolveEmailVisualTheme(subject);
     await emailjs.send(
       SERVICE_ID!,
       TEMPLATE_ID!,
       {
         to_email: recipientEmail,                               // → To Email: {{to_email}} (supports multi-recipient list)
         cc_email: includeWorkflowCc ? workflowCcEmail : "",     // → Cc: {{cc_email}}
-        title:    subject,                                      // → Subject: {{title}}
-        name:     fromName,                                     // → From Name: {{name}}
-        email:    recipientEmail,                               // → Reply To: {{email}}
-        message,                                                // → Content: {{message}}
+        title: subject,                                         // → Subject: {{title}}
+        name: fromName,                                         // → From Name: {{name}}
+        email: recipientEmail,                                  // → Reply To: {{email}}
+        message,                                                // → Main content: {{message}}
+        header_color: visual.headerColor,                       // → Notification header accent
+        header_tint: visual.headerTint,                         // → Light accent background
+        status_label: visual.statusLabel,                       // → APPROVED / ACTION REQUIRED / etc.
+        category_label: visual.categoryLabel,                   // → Small label above the title
+        action_label: visual.actionLabel,                       // → CTA button text
+        action_url: appUrl,                                     // → CTA destination
+        event_time: formatEventTime(),                          // → Event time in ICT
+        preheader: `${visual.statusLabel}: ${subject}`,          // → Inbox preview text
       },
       PUBLIC_KEY!,
     );
