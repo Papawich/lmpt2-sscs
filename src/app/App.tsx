@@ -20,6 +20,8 @@ import {
   notifyShipOfficerRevisionRequested,
   notifyTerminalOfficerEditRequested,
   notifyShipOfficerEditRejected,
+  notifyTerminalOfficerVesselAccessRequest,
+  notifyShipOfficerVesselAccessReviewed,
   sendOTPEmail,
   adminNotificationEmails,
 } from "./emailService";
@@ -37,6 +39,9 @@ import {
   fetchMyProfile,
   fetchProfiles,
   updateProfileStatus,
+  fetchVesselAccesses,
+  requestVesselAccess,
+  reviewVesselAccess,
   fetchVessels,
   createVessel as createCloudVessel,
   renameVesselEverywhere,
@@ -47,7 +52,7 @@ import {
   getStudyDocumentUrl,
   deleteStudyDocument,
 } from "./backendService";
-import type { CloudPasswordResetRequest } from "./backendService";
+import type { CloudPasswordResetRequest, CloudVesselAccess } from "./backendService";
 import {
   FenderFlatBodySection,
   defaultFlatBodyData, defaultFenderReactionData, defaultBerthingEnergyData, isFenderFlatBodyComplete,
@@ -274,6 +279,16 @@ interface UserAccount {
   password?: string;
 }
 
+interface WorkflowMetaData {
+  terminalOfficerId?: string;
+  terminalOfficerName?: string;
+  assignedAt?: string;
+}
+
+function defaultWorkflowMetaData(): WorkflowMetaData {
+  return {};
+}
+
 interface StudyItem {
   id: string; section: string; name: string; desc: string;
   requiresDoc: boolean; requiresExpiry: boolean;
@@ -285,6 +300,7 @@ interface SSCSStudy {
   id: string; vesselId: number; vesselName: string; status: StudyStatus;
   initiatedById: string; initiatedByName: string; initiatedByRole?: Role;
   initiatedAt: string; submittedAt?: string;
+  submittedById?: string; submittedByName?: string;
   reviewedById?: string; reviewedByName?: string; approvedAt?: string;
   editRequestedById?: string; editRequestedByName?: string; editRequestedAt?: string;
   items: StudyItem[]; shipNotes: string; terminalNotes: string;
@@ -302,6 +318,7 @@ interface SSCSStudy {
   requiredDocuments: RequiredDocumentsData;
   attachmentData: AttachmentData;
   qualityAssessmentData: QualityAssessmentData;
+  workflowMetaData: WorkflowMetaData;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -331,6 +348,7 @@ const CLOUD_STUDY_DEFAULTS: Record<string, () => any> = {
   requiredDocuments: defaultRequiredDocumentsData,
   attachmentData: defaultAttachmentData,
   qualityAssessmentData: defaultQualityAssessmentData,
+  workflowMetaData: defaultWorkflowMetaData,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -382,7 +400,26 @@ function blankStudy(vessel: Vessel, user: UserAccount, prev?: SSCSStudy, initial
     requiredDocuments: prev?.requiredDocuments ?? defaultRequiredDocumentsData(),
     attachmentData: prev?.attachmentData ?? defaultAttachmentData(),
     qualityAssessmentData: prev?.qualityAssessmentData ?? defaultQualityAssessmentData(),
+    workflowMetaData: user.role === "terminal_officer"
+      ? { terminalOfficerId: user.id, terminalOfficerName: user.name, assignedAt: new Date().toISOString() }
+      : prev?.workflowMetaData ?? defaultWorkflowMetaData(),
   };
+}
+
+function assignTerminalOfficer(study: SSCSStudy, officer: UserAccount): SSCSStudy {
+  if (officer.role !== "terminal_officer") return study;
+  return {
+    ...study,
+    workflowMetaData: {
+      terminalOfficerId: officer.id,
+      terminalOfficerName: officer.name,
+      assignedAt: new Date().toISOString(),
+    },
+  };
+}
+
+function clearTerminalOfficerAssignment(study: SSCSStudy): SSCSStudy {
+  return { ...study, workflowMetaData: defaultWorkflowMetaData() };
 }
 
 function completionPct(study: SSCSStudy) {
@@ -667,11 +704,13 @@ function Logo() {
   );
 }
 
-type TaskItem = { study: SSCSStudy; label: string; priority: "high" | "normal" };
+type TaskItem =
+  | { kind: "study"; study: SSCSStudy; label: string; priority: "high" | "normal" }
+  | { kind: "vessel_access"; access: CloudVesselAccess; vessel: Vessel; label: string; priority: "high" | "normal" };
 
 function TaskFloater({ tasks, open, onToggle, onSelect }: {
   tasks: TaskItem[]; open: boolean;
-  onToggle: () => void; onSelect: (s: SSCSStudy) => void;
+  onToggle: () => void; onSelect: (task: TaskItem) => void;
 }) {
   const priorityColor = (p: TaskItem["priority"]) =>
     p === "high" ? "text-amber-400" : "text-sky-400";
@@ -696,11 +735,13 @@ function TaskFloater({ tasks, open, onToggle, onSelect }: {
                 </div>
               )
               : tasks.map((t, i) => (
-                <button key={t.study.id} onClick={() => onSelect(t.study)}
+                <button key={t.kind === "study" ? t.study.id : t.access.id} onClick={() => onSelect(t)}
                   className={`w-full text-left px-4 py-3.5 hover:bg-secondary transition-colors group ${i < tasks.length - 1 ? "border-b border-border/50" : ""}`}>
                   <div className="flex items-start justify-between gap-2 mb-1">
-                    <p className="text-xs font-semibold text-foreground group-hover:text-primary transition-colors truncate">{t.study.vesselName}</p>
-                    <StudyBadge status={t.study.status} />
+                    <p className="text-xs font-semibold text-foreground group-hover:text-primary transition-colors truncate">{t.kind === "study" ? t.study.vesselName : t.vessel.name}</p>
+                    {t.kind === "study" ? <StudyBadge status={t.study.status} /> : (
+                      <span className="font-mono text-[8px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-yellow-500/25 bg-yellow-500/10 text-yellow-400">Access Request</span>
+                    )}
                   </div>
                   <p className={`font-mono text-[10px] ${priorityColor(t.priority)}`}>{t.label}</p>
                 </button>
@@ -865,6 +906,7 @@ export default function App() {
   const [users, setUsers]             = useState<UserAccount[]>(supabaseConfigured ? [] : INITIAL_USERS);
   const [studies, setStudies]         = useState<SSCSStudy[]>(supabaseConfigured ? [] : INITIAL_STUDIES);
   const [vessels, setVessels]         = useState<Vessel[]>(supabaseConfigured ? [] : INITIAL_VESSELS);
+  const [vesselAccesses, setVesselAccesses] = useState<CloudVesselAccess[]>([]);
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
   const [backendLoading, setBackendLoading] = useState(supabaseConfigured);
   const [backendError, setBackendError] = useState("");
@@ -878,6 +920,11 @@ export default function App() {
   const [shipNameSaving, setShipNameSaving] = useState(false);
   const [toast, setToast]             = useState<{ msg: string; type: "success" | "error" | "info" } | null>(null);
   const [kickoffVessel, setKickoffVessel] = useState<Vessel | null>(null);
+  const [accessRequestMode, setAccessRequestMode] = useState<"claim" | "additional" | "handover" | null>(null);
+  const [accessRequestReason, setAccessRequestReason] = useState("");
+  const [accessRequestBusy, setAccessRequestBusy] = useState(false);
+  const [accessReviewBusyId, setAccessReviewBusyId] = useState<string | null>(null);
+  const [revokePreviousOnApprove, setRevokePreviousOnApprove] = useState<Record<string, boolean>>({});
 
   // ── Login state ─────────────────────────────────────────────────────────────
   const [loginEmail, setLoginEmail]     = useState("");
@@ -944,7 +991,10 @@ export default function App() {
   const [addVReferenceVesselId, setAddVReferenceVesselId] = useState<number | null>(null);
   const [addVSisterStatement, setAddVSisterStatement] = useState<File | null>(null);
 
-  const pendingCount = users.filter(u => !u.isAdmin && u.status === "pending").length;
+  const pendingCount = users.filter(u => !u.isAdmin && u.status === "pending").length
+    + ((currentUser?.role === "terminal_officer" || currentUser?.isAdmin)
+      ? vesselAccesses.filter(access => access.status === "pending").length
+      : 0);
   const addVReferenceCandidates = vessels
     .filter(v => !!getLatestApprovedStudy(studies, v.id))
     .filter(v => {
@@ -952,6 +1002,22 @@ export default function App() {
       return !q || [v.name, v.imo, v.callSign].some(value => (value || "").toLowerCase().includes(q));
     })
     .slice(0, 8);
+
+  function hasApprovedVesselAccess(vesselId: number, userId: string) {
+    const explicitAccess = vesselAccesses.filter(access => access.vesselId === vesselId && access.userId === userId);
+    if (explicitAccess.length > 0) return explicitAccess.some(access => access.status === "approved");
+    const vessel = vessels.find(candidate => candidate.id === vesselId);
+    if (vessel?.createdById === userId) return true;
+    return studies.some(study =>
+      study.vesselId === vesselId
+      && study.initiatedById === userId
+      && !["access_requested", "access_rejected"].includes(study.status)
+    );
+  }
+
+  function approvedVesselAccesses(vesselId: number) {
+    return vesselAccesses.filter(access => access.vesselId === vesselId && access.status === "approved");
+  }
 
   function showToast(msg: string, type: "success" | "error" | "info" = "success") {
     setToast({ msg, type });
@@ -966,23 +1032,24 @@ export default function App() {
 
 
   function openApprovalEmailDraft(vessel: Vessel, study: SSCSStudy) {
-    const recipient = users.find(user => user.id === study.initiatedById)?.email?.trim() ?? "";
-    const ccRecipient = ((import.meta.env.VITE_EMAILJS_CC_EMAIL as string | undefined)?.trim() || "pttlng-marinelmpt2@pttlng.com");
+    const recipient = users.find(user => user.id === (study.submittedById ?? study.initiatedById))?.email?.trim() ?? "";
     const { subject, body } = buildApprovalEmailDraft(vessel, study);
-    const mailto = `mailto:${encodeURIComponent(recipient)}?cc=${encodeURIComponent(ccRecipient)}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    const mailto = `mailto:${encodeURIComponent(recipient)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
     window.location.href = mailto;
   }
 
   async function loadCloudData() {
     if (!supabaseConfigured) return;
-    const [cloudUsers, cloudVessels, cloudStudies] = await Promise.all([
+    const [cloudUsers, cloudVesselAccesses, cloudVessels, cloudStudies] = await Promise.all([
       fetchProfiles(),
+      fetchVesselAccesses(),
       fetchVessels(),
       fetchStudies(CLOUD_STUDY_DEFAULTS),
     ]);
     const loadedVessels = cloudVessels as Vessel[];
     const vesselMap = new Map(loadedVessels.map(vessel => [vessel.id, vessel]));
     setUsers(cloudUsers as UserAccount[]);
+    setVesselAccesses(cloudVesselAccesses);
     setVessels(loadedVessels);
     setStudies((cloudStudies as SSCSStudy[]).map(study => withCanonicalVesselIdentity(study, vesselMap.get(study.vesselId))));
   }
@@ -1352,7 +1419,7 @@ export default function App() {
     } finally {
       setCurrentUser(null); setLoginEmail(""); setLoginPw(""); setSearchQuery("");
       setSelectedVessel(null); setActiveStudy(null); setPage("login");
-      if (supabaseConfigured) { setUsers([]); setVessels([]); setStudies([]); }
+      if (supabaseConfigured) { setUsers([]); setVesselAccesses([]); setVessels([]); setStudies([]); }
     }
   }
 
@@ -1375,6 +1442,24 @@ export default function App() {
     setActiveStudy(updated);
     setStudies(prev => prev.map(s => s.id === updated.id ? updated : s));
     persistStudy(updated, immediate);
+  }
+
+  function approvedTerminalEmails(): string[] {
+    return Array.from(new Set(users
+      .filter(user => user.role === "terminal_officer" && user.status === "approved")
+      .map(user => user.email.trim())
+      .filter(Boolean)));
+  }
+
+  function assignedTerminalForStudy(study: SSCSStudy): UserAccount | undefined {
+    const assignedId = study.workflowMetaData?.terminalOfficerId;
+    if (!assignedId) return undefined;
+    return users.find(user => user.id === assignedId && user.role === "terminal_officer" && user.status === "approved");
+  }
+
+  function terminalEmailTargetsForStudy(study: SSCSStudy): string[] {
+    const assigned = assignedTerminalForStudy(study);
+    return assigned?.email?.trim() ? [assigned.email.trim()] : approvedTerminalEmails();
   }
 
   function updateItem(itemId: string, field: keyof StudyItem, val: string) {
@@ -1546,24 +1631,129 @@ export default function App() {
     }
   }
 
-  function initiateStudy(vessel: Vessel, fromExisting?: SSCSStudy) {
+  async function submitVesselAccessRequest(vessel: Vessel) {
+    if (!currentUser || currentUser.role !== "ship_officer" || !accessRequestMode) return;
+    setAccessRequestBusy(true);
+    try {
+      const requestType = accessRequestMode;
+      let created: CloudVesselAccess;
+      if (supabaseConfigured) {
+        created = await requestVesselAccess({
+          vesselId: vessel.id,
+          userId: currentUser.id,
+          requestType,
+          reason: accessRequestReason,
+        });
+      } else {
+        created = {
+          id: `access-${Date.now()}`,
+          vesselId: vessel.id,
+          userId: currentUser.id,
+          requestType,
+          status: "pending",
+          reason: accessRequestReason.trim(),
+          requestedAt: new Date().toISOString(),
+          revokePrevious: false,
+        };
+      }
+      setVesselAccesses(prev => [created, ...prev.filter(access => access.id !== created.id)]);
+      const terminalEmails = approvedTerminalEmails();
+      if (terminalEmails.length) {
+        void notifyTerminalOfficerVesselAccessRequest({
+          vesselName: vessel.name,
+          requesterName: currentUser.name,
+          requesterEmail: currentUser.email,
+          requestType,
+          reason: accessRequestReason.trim(),
+          terminalEmail: terminalEmails,
+        }).catch(err => console.error("[Vessel access request email failed]", err));
+      }
+      setAccessRequestMode(null);
+      setAccessRequestReason("");
+      showToast(requestType === "claim" ? "Vessel claim sent to Terminal Officer." : "Vessel access request sent to Terminal Officer.", "success");
+    } catch (err) {
+      console.error("[Vessel access request failed]", err);
+      showToast(err instanceof Error ? err.message : "Unable to request vessel access.", "error");
+    } finally {
+      setAccessRequestBusy(false);
+    }
+  }
+
+  async function handleReviewVesselAccess(request: CloudVesselAccess, status: "approved" | "rejected") {
     if (!currentUser) return;
-    const newStudy = blankStudy(vessel, currentUser, fromExisting);
+    setAccessReviewBusyId(request.id);
+    try {
+      const revokePrevious = status === "approved"
+        && request.requestType === "handover"
+        && (revokePreviousOnApprove[request.id] ?? true);
+      if (supabaseConfigured) {
+        await reviewVesselAccess({ requestId: request.id, status, revokePrevious });
+        await loadCloudData();
+      } else {
+        setVesselAccesses(prev => prev.map(access => {
+          if (revokePrevious && access.vesselId === request.vesselId && access.status === "approved" && access.userId !== request.userId) {
+            return { ...access, status: "revoked" as const, reviewedAt: new Date().toISOString(), reviewedBy: currentUser.id };
+          }
+          if (access.id !== request.id) return access;
+          return { ...access, status, reviewedAt: new Date().toISOString(), reviewedBy: currentUser.id, revokePrevious };
+        }));
+      }
+      const requester = users.find(user => user.id === request.userId);
+      const vessel = vessels.find(candidate => candidate.id === request.vesselId);
+      if (requester && vessel) {
+        void notifyShipOfficerVesselAccessReviewed({
+          vesselName: vessel.name,
+          status,
+          reviewedByName: currentUser.name,
+          shipEmail: requester.email,
+        }).catch(err => console.error("[Vessel access review email failed]", err));
+      }
+      showToast(status === "approved" ? "Vessel access approved." : "Vessel access request rejected.", status === "approved" ? "success" : "info");
+    } catch (err) {
+      console.error("[Vessel access review failed]", err);
+      showToast(err instanceof Error ? err.message : "Unable to review vessel access request.", "error");
+    } finally {
+      setAccessReviewBusyId(null);
+    }
+  }
+
+  function initiateStudy(vessel: Vessel, fromExisting?: SSCSStudy, useApprovedVesselAccess = false) {
+    if (!currentUser) return;
+    let newStudy = blankStudy(vessel, currentUser, fromExisting, useApprovedVesselAccess ? "draft" : undefined);
+
+    // A Terminal Officer who approved vessel access may own this active study cycle.
+    // Once the study is approved, the owner is cleared so the next request is broadcast again.
+    if (currentUser.role === "ship_officer" && useApprovedVesselAccess) {
+      const approvedAccess = vesselAccesses
+        .filter(access => access.vesselId === vessel.id && access.userId === currentUser.id && access.status === "approved" && access.reviewedBy)
+        .sort((a, b) => new Date(b.reviewedAt ?? b.requestedAt).getTime() - new Date(a.reviewedAt ?? a.requestedAt).getTime())[0];
+      const reviewer = approvedAccess?.reviewedBy
+        ? users.find(user => user.id === approvedAccess.reviewedBy && user.role === "terminal_officer" && user.status === "approved")
+        : undefined;
+      if (reviewer) newStudy = assignTerminalOfficer(newStudy, reviewer);
+    }
+
     setStudies(prev => [...prev, newStudy]);
     setActiveStudy(newStudy);
     persistStudy(newStudy, true);
     setKickoffVessel(null);
     setPage("study");
-    // If access_requested, notify all terminal officers
     if (newStudy.status === "access_requested") {
-      users.filter(u => u.role === "terminal_officer" && u.status === "approved").forEach(u =>
-        notifyTerminalOfficerAccessRequest({ vesselName: vessel.name, requesterName: currentUser.name, requesterEmail: currentUser.email, terminalEmail: u.email })
-      );
+      const terminalEmails = approvedTerminalEmails();
+      if (terminalEmails.length) {
+        void notifyTerminalOfficerAccessRequest({
+          vesselName: vessel.name,
+          requesterName: currentUser.name,
+          requesterEmail: currentUser.email,
+          terminalEmail: terminalEmails,
+        }).catch(err => console.error("[Study access request email failed]", err));
+      }
     }
   }
 
   function approveAccess(study: SSCSStudy) {
-    syncStudy({ ...study, status: "draft" }, true);
+    if (!currentUser) return;
+    syncStudy(assignTerminalOfficer({ ...study, status: "draft" }, currentUser), true);
     showToast(`Access granted to ${study.initiatedByName}. Study is now open for data entry.`, "success");
     const shipUser = users.find(u => u.id === study.initiatedById);
     if (shipUser && currentUser)
@@ -1768,20 +1958,18 @@ export default function App() {
   }
 
   function notifyTerminalOfficersOfEditRequest(study: SSCSStudy, requester: UserAccount) {
-    users
-      .filter(u => u.role === "terminal_officer" && u.status === "approved")
-      .forEach(u => {
-        void notifyTerminalOfficerEditRequested({
-          vesselName: study.vesselName,
-          requesterName: requester.name,
-          requesterEmail: requester.email,
-          terminalEmail: u.email,
-        }).catch(err => console.error("[Edit request email failed]", err));
-      });
+    const terminalEmails = terminalEmailTargetsForStudy(study);
+    if (!terminalEmails.length) return;
+    void notifyTerminalOfficerEditRequested({
+      vesselName: study.vesselName,
+      requesterName: requester.name,
+      requesterEmail: requester.email,
+      terminalEmail: terminalEmails,
+    }).catch(err => console.error("[Edit request email failed]", err));
   }
 
   function notifyShipOfficerOfEditApproval(study: SSCSStudy, approvedByName: string) {
-    const shipUser = users.find(u => u.id === study.initiatedById);
+    const shipUser = users.find(u => u.id === (study.editRequestedById ?? study.submittedById ?? study.initiatedById));
     if (!shipUser) return;
     void notifyShipOfficerEditApproved({
       vesselName: study.vesselName,
@@ -1791,7 +1979,7 @@ export default function App() {
   }
 
   function notifyShipOfficerOfEditRejection(study: SSCSStudy, rejectedByName: string) {
-    const shipUser = users.find(u => u.id === study.initiatedById);
+    const shipUser = users.find(u => u.id === (study.editRequestedById ?? study.submittedById ?? study.initiatedById));
     if (!shipUser) return;
     void notifyShipOfficerEditRejected({
       vesselName: study.vesselName,
@@ -1821,6 +2009,8 @@ export default function App() {
       ),
       status: "submitted",
       submittedAt: new Date().toISOString(),
+      submittedById: currentUser.id,
+      submittedByName: currentUser.name,
     };
 
     syncStudy(submittedStudy, true);
@@ -1829,25 +2019,36 @@ export default function App() {
       v.id === submittedStudy.vesselId ? vesselWithSubmittedGeneralInfo(v, submittedStudy) : v
     ));
     showToast("Study submitted to Terminal Officer for review.", "success");
-    // Notify all terminal officers
-    users.filter(u => u.role === "terminal_officer").forEach(u =>
-      notifyTerminalOfficerStudySubmitted({ vesselName: submittedStudy.vesselName, submitterName: currentUser.name, terminalEmail: u.email })
-    );
+    const terminalEmails = terminalEmailTargetsForStudy(submittedStudy);
+    if (terminalEmails.length) {
+      void notifyTerminalOfficerStudySubmitted({
+        vesselName: submittedStudy.vesselName,
+        submitterName: currentUser.name,
+        terminalEmail: terminalEmails,
+      }).catch(err => console.error("[Study submitted email failed]", err));
+    }
   }
 
   function approveStudy() {
     if (!activeStudy || !currentUser) return;
-    syncStudy({ ...activeStudy, status: "approved", reviewedById: currentUser.id, reviewedByName: currentUser.name, approvedAt: new Date().toISOString() }, true);
+    const approvedStudy = clearTerminalOfficerAssignment({
+      ...activeStudy,
+      status: "approved",
+      reviewedById: currentUser.id,
+      reviewedByName: currentUser.name,
+      approvedAt: new Date().toISOString(),
+    });
+    syncStudy(approvedStudy, true);
     showToast("Study approved and locked.", "success");
-    const shipUser = users.find(u => u.id === activeStudy.initiatedById);
+    const shipUser = users.find(u => u.id === (activeStudy.submittedById ?? activeStudy.initiatedById));
     if (shipUser)
       notifyShipOfficerStudyApproved({ vesselName: activeStudy.vesselName, approvedByName: currentUser.name, shipEmail: shipUser.email });
   }
 
   function requestRevision() {
     if (!activeStudy || !currentUser) return;
-    syncStudy({ ...activeStudy, status: "draft" }, true);
-    const shipUser = users.find(u => u.id === activeStudy.initiatedById);
+    syncStudy(assignTerminalOfficer({ ...activeStudy, status: "draft" }, currentUser), true);
+    const shipUser = users.find(u => u.id === (activeStudy.submittedById ?? activeStudy.initiatedById));
     if (shipUser) {
       void notifyShipOfficerRevisionRequested({
         vesselName: activeStudy.vesselName,
@@ -1867,14 +2068,14 @@ export default function App() {
 
   function approveEditRequest() {
     if (!activeStudy || !currentUser) return;
-    syncStudy({ ...activeStudy, status: "editing" }, true);
+    syncStudy(assignTerminalOfficer({ ...activeStudy, status: "editing" }, currentUser), true);
     notifyShipOfficerOfEditApproval(activeStudy, currentUser.name);
     showToast("Edit request approved. User may now edit.", "success");
   }
 
   function rejectEditRequest() {
     if (!activeStudy || !currentUser) return;
-    syncStudy({ ...activeStudy, status: "approved", editRequestedById: undefined, editRequestedByName: undefined, editRequestedAt: undefined }, true);
+    syncStudy(clearTerminalOfficerAssignment({ ...activeStudy, status: "approved", editRequestedById: undefined, editRequestedByName: undefined, editRequestedAt: undefined }), true);
     notifyShipOfficerOfEditRejection(activeStudy, currentUser.name);
     showToast("Edit request rejected. Study remains locked.", "info");
   }
@@ -1886,24 +2087,42 @@ export default function App() {
     if (!currentUser) return [];
     const uid = currentUser.id;
     const role = currentUser.role;
-    return studies.flatMap(s => {
+    const studyTasks: TaskItem[] = studies.flatMap(s => {
       if (role === "terminal_officer") {
-        if (s.status === "access_requested") return [{ study: s, label: "Access request — approve or reject", priority: "high" as const }];
-        if (s.status === "submitted")        return [{ study: s, label: "Study submitted — review & approve", priority: "high" as const }];
-        if (s.status === "edit_requested")   return [{ study: s, label: "Edit requested — approve or reject", priority: "normal" as const }];
+        if (s.status === "access_requested") return [{ kind: "study" as const, study: s, label: "Study access request — approve or reject", priority: "high" as const }];
+        if (s.status === "submitted")        return [{ kind: "study" as const, study: s, label: "Study submitted — review & approve", priority: "high" as const }];
+        if (s.status === "edit_requested")   return [{ kind: "study" as const, study: s, label: "Edit requested — approve or reject", priority: "normal" as const }];
       } else if (role === "ship_officer") {
-        if (s.initiatedById === uid) {
-          if (s.status === "draft")            return [{ study: s, label: "Draft incomplete — continue filling", priority: "normal" as const }];
-          if (s.status === "access_requested") return [{ study: s, label: "Awaiting Terminal Officer access approval", priority: "normal" as const }];
-          if (s.status === "editing")          return [{ study: s, label: "Edit approved — continue editing", priority: "high" as const }];
+        if (hasApprovedVesselAccess(s.vesselId, uid)) {
+          if (s.status === "draft")   return [{ kind: "study" as const, study: s, label: "Draft incomplete — continue filling", priority: "normal" as const }];
+          if (s.status === "editing") return [{ kind: "study" as const, study: s, label: "Edit approved — continue editing", priority: "high" as const }];
         }
+        if (s.initiatedById === uid && s.status === "access_requested")
+          return [{ kind: "study" as const, study: s, label: "Awaiting Terminal Officer access approval", priority: "normal" as const }];
       }
       return [];
     });
+
+    if (role !== "terminal_officer" && !currentUser.isAdmin) return studyTasks;
+    const accessTasks: TaskItem[] = vesselAccesses
+      .filter(access => access.status === "pending")
+      .flatMap(access => {
+        const vessel = vessels.find(candidate => candidate.id === access.vesselId);
+        return vessel ? [{ kind: "vessel_access" as const, access, vessel, label: `Vessel ${access.requestType} request — review access`, priority: "high" as const }] : [];
+      });
+    return [...accessTasks, ...studyTasks];
   })();
 
-  function goToStudyFromTask(s: SSCSStudy) {
-    const v = vessels.find(v => v.id === s.vesselId);
+  function goToStudyFromTask(task: TaskItem) {
+    if (task.kind === "vessel_access") {
+      setSelectedVessel(task.vessel);
+      setActiveStudy(null);
+      setShowTaskPanel(false);
+      setPage("vessel");
+      return;
+    }
+    const s = task.study;
+    const v = vessels.find(vessel => vessel.id === s.vesselId);
     if (v) setSelectedVessel(v);
     setActiveStudy(s);
     setShowTaskPanel(false);
@@ -2737,11 +2956,30 @@ export default function App() {
     const role    = currentUser.role;
     const isTerminal = role === "terminal_officer";
     const isShip     = role === "ship_officer";
+    const canReviewVesselAccess = isTerminal || currentUser.isAdmin;
+    const vesselAccessRows = vesselAccesses.filter(access => access.vesselId === v.id);
+    const approvedAccessRows = vesselAccessRows.filter(access => access.status === "approved");
+    const pendingAccessRows = vesselAccessRows.filter(access => access.status === "pending");
+    const myPendingVesselAccess = pendingAccessRows.find(access => access.userId === currentUser.id);
+    const myLatestRejectedAccess = vesselAccessRows.find(access => access.userId === currentUser.id && access.status === "rejected");
+    const canShipManageVessel = isShip && hasApprovedVesselAccess(v.id, currentUser.id);
+    const hasExplicitAssignments = vesselAccessRows.some(access => access.status === "approved" || access.status === "revoked");
+    const legacyAssignedUserIds = !hasExplicitAssignments
+      ? Array.from(new Set([
+          ...(v.createdById ? [v.createdById] : []),
+          ...(study && !["access_requested", "access_rejected"].includes(study.status) ? [study.initiatedById] : []),
+        ]))
+      : [];
+    const authorizedShipOfficerIds = Array.from(new Set([
+      ...approvedAccessRows.map(access => access.userId),
+      ...legacyAssignedUserIds,
+    ])).filter(userId => users.find(user => user.id === userId)?.role === "ship_officer");
+    const vesselHasAssignedShipOfficer = authorizedShipOfficerIds.length > 0;
 
     const expiredItems = study?.status === "approved"
       ? study.items.filter(i => i.requiresExpiry && isExpired(i.expiryDate)) : [];
     const vesselInactive = v.status === "In Refit";
-    const canKickoff = isShip && study?.status === "approved" && (vesselInactive || expiredItems.length > 0);
+    const canKickoff = canShipManageVessel && study?.status === "approved" && (vesselInactive || expiredItems.length > 0);
     const canInitiate = (isTerminal || isShip) && !study;
     const sisterReferenceVessel = v.referenceVesselId ? vessels.find(candidate => candidate.id === v.referenceVesselId) : undefined;
     const sisterReferenceStudy = v.sisterReferenceStudyId
@@ -2814,6 +3052,154 @@ export default function App() {
               </div>
             )}
           </div>
+
+          {(isShip || canReviewVesselAccess) && (
+            <div className="border border-border rounded bg-card p-5 mb-6">
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <div className="flex items-center gap-2">
+                  <Users className="w-4 h-4 text-primary" />
+                  <p className="font-mono text-xs font-bold uppercase tracking-widest text-foreground">Vessel Access</p>
+                </div>
+                {authorizedShipOfficerIds.length > 0 ? (
+                  <span className="font-mono text-[9px] uppercase tracking-wider px-2 py-1 rounded border border-emerald-500/25 bg-emerald-500/10 text-emerald-400">
+                    {authorizedShipOfficerIds.length} authorised
+                  </span>
+                ) : (
+                  <span className="font-mono text-[9px] uppercase tracking-wider px-2 py-1 rounded border border-amber-500/25 bg-amber-500/10 text-amber-400">Unassigned</span>
+                )}
+              </div>
+
+              {authorizedShipOfficerIds.length > 0 && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
+                  {authorizedShipOfficerIds.map(userId => {
+                    const user = users.find(candidate => candidate.id === userId);
+                    if (!user) return null;
+                    return (
+                      <div key={userId} className="rounded border border-border bg-secondary/60 px-3 py-2.5">
+                        <p className="text-xs font-mono text-foreground">{user.name}</p>
+                        <p className="text-[10px] text-muted-foreground mt-0.5">{user.company || "—"} · {user.email}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {isShip && canShipManageVessel && (
+                <div className="flex items-start gap-2.5 rounded border border-emerald-500/25 bg-emerald-500/5 px-3 py-2.5">
+                  <ShieldCheck className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
+                  <div>
+                    <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-emerald-400">Your vessel access is approved</p>
+                    <p className="text-xs text-muted-foreground mt-1">You may work on this vessel according to the current SSCS study status. Existing study history and original initiator remain unchanged.</p>
+                  </div>
+                </div>
+              )}
+
+              {isShip && !canShipManageVessel && myPendingVesselAccess && (
+                <div className="flex items-start gap-2.5 rounded border border-yellow-500/25 bg-yellow-500/5 px-3 py-2.5">
+                  <Clock className="w-4 h-4 text-yellow-400 mt-0.5 shrink-0" />
+                  <div>
+                    <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-yellow-400">Vessel access request pending</p>
+                    <p className="text-xs text-muted-foreground mt-1">Request type: <span className="text-foreground font-mono">{myPendingVesselAccess.requestType}</span>. Waiting for Terminal Officer review.</p>
+                  </div>
+                </div>
+              )}
+
+              {isShip && !canShipManageVessel && !myPendingVesselAccess && (
+                <div className="space-y-3">
+                  {!accessRequestMode ? (
+                    <>
+                      <p className="text-xs text-muted-foreground">
+                        {vesselHasAssignedShipOfficer
+                          ? "This vessel already has an authorised Ship Officer. Request additional access or a handover if you are taking over responsibility for this vessel."
+                          : "This vessel has no Ship Officer assigned in the system. If you are the current authorised Ship Officer / vessel representative, claim this vessel for Terminal Officer approval."}
+                      </p>
+                      {myLatestRejectedAccess && (
+                        <p className="text-[11px] text-red-400">Your previous vessel access request was rejected. You may submit a new request with updated information.</p>
+                      )}
+                      <div className="flex flex-wrap gap-2">
+                        {!vesselHasAssignedShipOfficer ? (
+                          <button onClick={() => { setAccessRequestMode("claim"); setAccessRequestReason(""); }}
+                            className="flex items-center gap-2 bg-primary text-primary-foreground font-mono font-semibold text-xs uppercase px-4 py-2 rounded hover:bg-primary/90 transition-colors">
+                            <ShieldCheck className="w-3.5 h-3.5" />Claim This Vessel
+                          </button>
+                        ) : (
+                          <>
+                            <button onClick={() => { setAccessRequestMode("additional"); setAccessRequestReason(""); }}
+                              className="flex items-center gap-2 border border-sky-500/30 bg-sky-500/5 text-sky-400 hover:bg-sky-500/10 font-mono font-semibold text-xs uppercase px-4 py-2 rounded transition-colors">
+                              <Users className="w-3.5 h-3.5" />Request Additional Access
+                            </button>
+                            <button onClick={() => { setAccessRequestMode("handover"); setAccessRequestReason(""); }}
+                              className="flex items-center gap-2 border border-amber-500/30 bg-amber-500/5 text-amber-400 hover:bg-amber-500/10 font-mono font-semibold text-xs uppercase px-4 py-2 rounded transition-colors">
+                              <RefreshCw className="w-3.5 h-3.5" />Request Handover
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="rounded border border-border bg-secondary/40 p-4 space-y-3">
+                      <div>
+                        <p className="font-mono text-xs font-bold text-foreground uppercase tracking-wide">
+                          {accessRequestMode === "claim" ? "Claim Existing Vessel" : accessRequestMode === "handover" ? "Ship Officer Handover" : "Additional Ship Officer Access"}
+                        </p>
+                        <p className="text-[11px] text-muted-foreground mt-1">Terminal Officer approval is required before edit access is granted.</p>
+                      </div>
+                      <div>
+                        <label className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest">Reason / Remark</label>
+                        <textarea value={accessRequestReason} onChange={event => setAccessRequestReason(event.target.value)} rows={3}
+                          placeholder={accessRequestMode === "claim" ? "e.g. I am the current Ship Officer / vessel representative." : accessRequestMode === "handover" ? "e.g. Taking over from the previous Ship Officer." : "Reason for requiring access to this vessel."}
+                          className="mt-1.5 w-full bg-background border border-border rounded px-3 py-2 text-sm text-foreground outline-none focus:border-primary/60 resize-y" />
+                      </div>
+                      <div className="flex gap-2">
+                        <button onClick={() => submitVesselAccessRequest(v)} disabled={accessRequestBusy}
+                          className="flex items-center gap-2 bg-primary text-primary-foreground font-mono font-semibold text-xs uppercase px-4 py-2 rounded hover:bg-primary/90 disabled:opacity-50 transition-colors">
+                          {accessRequestBusy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}Submit Request
+                        </button>
+                        <button onClick={() => { setAccessRequestMode(null); setAccessRequestReason(""); }} disabled={accessRequestBusy}
+                          className="px-4 py-2 rounded border border-border text-xs font-mono text-muted-foreground hover:text-foreground hover:bg-secondary">Cancel</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {canReviewVesselAccess && pendingAccessRows.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-border space-y-3">
+                  <p className="font-mono text-[10px] text-yellow-400 font-bold uppercase tracking-widest">Pending Vessel Access Requests</p>
+                  {pendingAccessRows.map(request => {
+                    const requester = users.find(user => user.id === request.userId);
+                    const revokePrevious = revokePreviousOnApprove[request.id] ?? true;
+                    return (
+                      <div key={request.id} className="rounded border border-yellow-500/25 bg-yellow-500/5 p-4 space-y-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                          <div><p className="font-mono text-[9px] text-muted-foreground uppercase tracking-widest">Requested by</p><p className="text-xs text-foreground font-mono mt-1">{requester?.name ?? request.userId}</p><p className="text-[10px] text-muted-foreground">{requester?.email ?? "—"}</p></div>
+                          <div><p className="font-mono text-[9px] text-muted-foreground uppercase tracking-widest">Request type</p><p className="text-xs text-foreground font-mono mt-1 uppercase">{request.requestType}</p></div>
+                          <div><p className="font-mono text-[9px] text-muted-foreground uppercase tracking-widest">Requested</p><p className="text-xs text-foreground font-mono mt-1">{fmtDate(request.requestedAt)}</p></div>
+                        </div>
+                        {request.reason && <p className="text-xs text-muted-foreground"><span className="font-mono text-foreground">Remark:</span> {request.reason}</p>}
+                        {request.requestType === "handover" && authorizedShipOfficerIds.length > 0 && (
+                          <label className="flex items-center gap-2 text-xs text-amber-300 cursor-pointer select-none">
+                            <input type="checkbox" checked={revokePrevious} onChange={event => setRevokePreviousOnApprove(prev => ({ ...prev, [request.id]: event.target.checked }))} className="accent-amber-500" />
+                            Revoke previous Ship Officer access when approving this handover
+                          </label>
+                        )}
+                        <div className="flex gap-2">
+                          <button onClick={() => handleReviewVesselAccess(request, "approved")} disabled={accessReviewBusyId === request.id}
+                            className="flex items-center gap-2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 hover:bg-emerald-500/20 disabled:opacity-50 font-mono font-semibold text-xs uppercase px-4 py-2 rounded transition-colors">
+                            <ShieldCheck className="w-3.5 h-3.5" />Approve
+                          </button>
+                          <button onClick={() => handleReviewVesselAccess(request, "rejected")} disabled={accessReviewBusyId === request.id}
+                            className="flex items-center gap-2 bg-red-500/10 text-red-400 border border-red-500/25 hover:bg-red-500/20 disabled:opacity-50 font-mono font-semibold text-xs uppercase px-4 py-2 rounded transition-colors">
+                            <ShieldX className="w-3.5 h-3.5" />Reject
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
 
           {v.isSisterShip && (
             <div className={`border rounded p-5 mb-6 ${
@@ -2891,11 +3277,14 @@ export default function App() {
                     <FilePlus className="w-4 h-4" />Initiate SSCS Study
                   </button>
                 )}
-                {isShip && (
-                  <button onClick={() => initiateStudy(v)}
+                {isShip && canShipManageVessel && (
+                  <button onClick={() => initiateStudy(v, undefined, true)}
                     className="flex items-center gap-2 bg-primary text-primary-foreground font-mono font-semibold text-sm tracking-widest uppercase px-5 py-2.5 rounded hover:bg-primary/90 active:scale-[0.98] transition-all">
-                    <Send className="w-4 h-4" />Request SSCS Study Access
+                    <FilePlus className="w-4 h-4" />Initiate SSCS Study
                   </button>
+                )}
+                {isShip && !canShipManageVessel && (
+                  <p className="text-xs text-amber-400">Request or claim vessel access in the Vessel Access panel above before initiating a study.</p>
                 )}
               </div>
             )}
@@ -3043,10 +3432,10 @@ export default function App() {
                 )}
 
                 {/* Cross-company notice for other Ship Officers */}
-                {isShip && study.initiatedById !== currentUser.id && (
+                {isShip && !canShipManageVessel && (
                   <div className="flex items-start gap-2 p-3 rounded bg-secondary border border-border text-xs text-muted-foreground">
                     <Info className="w-3.5 h-3.5 mt-0.5 shrink-0 text-sky-400" />
-                    <span>This study was authorised for <span className="font-mono text-foreground">{study.initiatedByName}</span>. Only the authorised Ship Officer and Terminal Officer can modify this study.</span>
+                    <span>This study was originally initiated by <span className="font-mono text-foreground">{study.initiatedByName}</span>. You can view it, but vessel access approval is required before you can modify or request edits.</span>
                   </div>
                 )}
 
@@ -3077,11 +3466,11 @@ export default function App() {
                   {/* Terminal: approve/reject edit request */}
                   {isTerminal && study.status === "edit_requested" && (
                     <>
-                      <button onClick={() => { syncStudy({ ...study, status: "editing" }); notifyShipOfficerOfEditApproval(study, currentUser.name); showToast("Edit request approved.", "success"); }}
+                      <button onClick={() => { syncStudy(assignTerminalOfficer({ ...study, status: "editing" }, currentUser)); notifyShipOfficerOfEditApproval(study, currentUser.name); showToast("Edit request approved.", "success"); }}
                         className="flex items-center gap-2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 font-mono font-semibold text-xs uppercase px-4 py-2 rounded transition-colors">
                         <CheckCircle2 className="w-3.5 h-3.5" />Approve Edit
                       </button>
-                      <button onClick={() => { syncStudy({ ...study, status: "approved", editRequestedById: undefined, editRequestedByName: undefined, editRequestedAt: undefined }); notifyShipOfficerOfEditRejection(study, currentUser.name); showToast("Edit request rejected.", "info"); }}
+                      <button onClick={() => { syncStudy(clearTerminalOfficerAssignment({ ...study, status: "approved", editRequestedById: undefined, editRequestedByName: undefined, editRequestedAt: undefined })); notifyShipOfficerOfEditRejection(study, currentUser.name); showToast("Edit request rejected.", "info"); }}
                         className="flex items-center gap-2 bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 font-mono font-semibold text-xs uppercase px-4 py-2 rounded transition-colors">
                         <XCircle className="w-3.5 h-3.5" />Reject Edit
                       </button>
@@ -3089,13 +3478,13 @@ export default function App() {
                   )}
 
                   {/* Authorised Ship Officer: continue or request edit */}
-                  {isShip && study.initiatedById === currentUser.id && (study.status === "draft" || (study.status === "editing" && study.editRequestedById === currentUser.id)) && (
+                  {canShipManageVessel && (study.status === "draft" || study.status === "editing") && (
                     <button onClick={() => openStudy(study)}
                       className="flex items-center gap-2 bg-primary text-primary-foreground font-mono font-semibold text-xs tracking-widest uppercase px-4 py-2 rounded hover:bg-primary/90 transition-all">
                       <Pencil className="w-3.5 h-3.5" />{study.status === "draft" ? "Continue Filling" : "Continue Editing"}
                     </button>
                   )}
-                  {isShip && study.initiatedById === currentUser.id && study.status === "approved" && !study.editRequestedById && !canKickoff && (
+                  {canShipManageVessel && study.status === "approved" && !study.editRequestedById && !canKickoff && (
                     <button onClick={() => { syncStudy({ ...study, status: "edit_requested", editRequestedById: currentUser.id, editRequestedByName: currentUser.name, editRequestedAt: new Date().toISOString() }); notifyTerminalOfficersOfEditRequest(study, currentUser); showToast("Edit request sent to Terminal Officer.", "info"); }}
                       className="flex items-center gap-2 px-4 py-2 rounded border border-orange-500/30 bg-orange-500/8 text-orange-400 hover:bg-orange-500/15 text-xs font-mono font-semibold uppercase transition-colors">
                       <Edit3 className="w-3.5 h-3.5" />Request to Edit
@@ -3103,7 +3492,7 @@ export default function App() {
                   )}
 
                   {/* Authorised Ship Officer: kickoff when expired/inactive */}
-                  {canKickoff && study.initiatedById === currentUser.id && !kickoffVessel && (
+                  {canKickoff && !kickoffVessel && (
                     <button onClick={() => setKickoffVessel(v)}
                       className="flex items-center gap-2 bg-amber-500/10 text-amber-400 border border-amber-500/30 hover:bg-amber-500/20 font-mono font-semibold text-xs uppercase px-4 py-2 rounded transition-colors">
                       <RotateCcw className="w-3.5 h-3.5" />Request SSCS Kickoff
@@ -3129,18 +3518,19 @@ export default function App() {
     const isShip     = role === "ship_officer";
     const st         = activeStudy.status;
     const uid        = currentUser.id;
+    const shipHasVesselAccess = isShip && hasApprovedVesselAccess(activeStudy.vesselId, uid);
 
     const canEdit =
-      (st === "draft"    && (isTerminal || uid === activeStudy.initiatedById)) ||
+      (st === "draft"    && (isTerminal || shipHasVesselAccess)) ||
       (st === "submitted" && isTerminal) ||
       (st === "approved"  && isTerminal) ||
-      (st === "editing"   && (isTerminal || uid === activeStudy.editRequestedById));
+      (st === "editing"   && (isTerminal || shipHasVesselAccess));
 
     const showTerminalFields = isTerminal && (st === "submitted" || st === "approved" || st === "editing");
     const pct = completionPct(activeStudy);
 
     const vessel = vessels.find(v => v.id === activeStudy.vesselId);
-    const canRenameShip = Boolean(vessel && (isTerminal || currentUser.isAdmin || vessel.createdById === uid));
+    const canRenameShip = Boolean(vessel && (isTerminal || currentUser.isAdmin || shipHasVesselAccess));
     const verifiedSisterShip = Boolean(vessel?.isSisterShip && vessel.sisterShipStatus === "verified");
     const referenceVessel = vessel?.referenceVesselId ? vessels.find(candidate => candidate.id === vessel.referenceVesselId) : undefined;
     const inheritedSectionReadOnly = (section: string) => verifiedSisterShip && [
@@ -3213,7 +3603,7 @@ export default function App() {
             <p className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest mr-2">Actions:</p>
 
             {/* Ship Officer: submit */}
-            {(isShip || (isTerminal && (st === "draft"))) && (st === "draft" || st === "editing") && (
+            {((isShip && shipHasVesselAccess) || (isTerminal && st === "draft")) && (st === "draft" || st === "editing") && (
               <button onClick={submitStudy}
                 className="flex items-center gap-1.5 bg-primary text-primary-foreground font-mono font-semibold text-xs tracking-widest uppercase px-3.5 py-2 rounded hover:bg-primary/90 transition-all">
                 <Send className="w-3.5 h-3.5" />Submit for Review
@@ -3245,7 +3635,7 @@ export default function App() {
             )}
 
             {/* Ship Officer: request to edit */}
-            {isShip && st === "approved" && !activeStudy.editRequestedById && (
+            {shipHasVesselAccess && st === "approved" && !activeStudy.editRequestedById && (
               <button onClick={requestEdit}
                 className="flex items-center gap-1.5 bg-orange-500/10 text-orange-400 border border-orange-500/20 hover:bg-orange-500/20 font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors">
                 <Edit3 className="w-3.5 h-3.5" />Request to Edit

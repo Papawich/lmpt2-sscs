@@ -24,6 +24,35 @@ export type CloudUploadedFile = {
 };
 
 
+
+export type CloudVesselAccess = {
+  id: string;
+  vesselId: number;
+  userId: string;
+  requestType: "claim" | "additional" | "handover" | "legacy";
+  status: "pending" | "approved" | "rejected" | "revoked";
+  reason: string;
+  requestedAt: string;
+  reviewedAt?: string | null;
+  reviewedBy?: string | null;
+  revokePrevious: boolean;
+};
+
+function vesselAccessFromRow(row: any): CloudVesselAccess {
+  return {
+    id: row.id,
+    vesselId: Number(row.vessel_id),
+    userId: row.user_id,
+    requestType: row.request_type,
+    status: row.status,
+    reason: row.reason ?? "",
+    requestedAt: row.requested_at,
+    reviewedAt: row.reviewed_at ?? null,
+    reviewedBy: row.reviewed_by ?? null,
+    revokePrevious: Boolean(row.revoke_previous),
+  };
+}
+
 export type CloudPasswordResetRequest = {
   id: string;
   userId: string | null;
@@ -68,6 +97,7 @@ const SECTION_KEYS = [
   ["required_documents", "requiredDocuments"],
   ["attachments", "attachmentData"],
   ["quality_assessment", "qualityAssessmentData"],
+  ["workflow_meta", "workflowMetaData"],
 ] as const;
 
 function profileFromRow(row: any): CloudProfile {
@@ -148,6 +178,8 @@ function studyCoreToRow(study: AnyStudy) {
     initiated_by_role: study.initiatedByRole ?? null,
     initiated_at: study.initiatedAt,
     submitted_at: study.submittedAt ?? null,
+    submitted_by_id: study.submittedById ?? null,
+    submitted_by_name: study.submittedByName ?? null,
     reviewed_by_id: study.reviewedById ?? null,
     reviewed_by_name: study.reviewedByName ?? null,
     approved_at: study.approvedAt ?? null,
@@ -335,6 +367,55 @@ export async function updateProfileStatus(id: string, status: "approved" | "reje
   if (error) throw error;
 }
 
+export async function fetchVesselAccesses(): Promise<CloudVesselAccess[]> {
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from("vessel_access")
+    .select("id,vessel_id,user_id,request_type,status,reason,requested_at,reviewed_at,reviewed_by,revoke_previous")
+    .order("requested_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map(vesselAccessFromRow);
+}
+
+export async function requestVesselAccess(opts: {
+  vesselId: number;
+  userId: string;
+  requestType: "claim" | "additional" | "handover";
+  reason?: string;
+}): Promise<CloudVesselAccess> {
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from("vessel_access")
+    .insert({
+      vessel_id: opts.vesselId,
+      user_id: opts.userId,
+      request_type: opts.requestType,
+      status: "pending",
+      reason: opts.reason?.trim() || "",
+    })
+    .select("id,vessel_id,user_id,request_type,status,reason,requested_at,reviewed_at,reviewed_by,revoke_previous")
+    .single();
+  if (error) throw error;
+  return vesselAccessFromRow(data);
+}
+
+export async function reviewVesselAccess(opts: {
+  requestId: string;
+  status: "approved" | "rejected";
+  revokePrevious?: boolean;
+}): Promise<CloudVesselAccess> {
+  const client = requireSupabase();
+  const { data, error } = await client.rpc("review_vessel_access", {
+    p_request_id: opts.requestId,
+    p_status: opts.status,
+    p_revoke_previous: Boolean(opts.revokePrevious),
+  });
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) throw new Error("Vessel access request was not found.");
+  return vesselAccessFromRow(row);
+}
+
 export async function fetchVessels(): Promise<AnyVessel[]> {
   const client = requireSupabase();
   const { data, error } = await client.from("vessels").select("*").order("name", { ascending: true });
@@ -424,6 +505,8 @@ export async function fetchStudies(defaults: Record<string, () => any>): Promise
       initiatedByRole: row.initiated_by_role ?? undefined,
       initiatedAt: row.initiated_at,
       submittedAt: row.submitted_at ?? undefined,
+      submittedById: row.submitted_by_id ?? undefined,
+      submittedByName: row.submitted_by_name ?? undefined,
       reviewedById: row.reviewed_by_id ?? undefined,
       reviewedByName: row.reviewed_by_name ?? undefined,
       approvedAt: row.approved_at ?? undefined,

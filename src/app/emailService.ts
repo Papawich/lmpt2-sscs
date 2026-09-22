@@ -5,7 +5,7 @@ import emailjs from "@emailjs/browser";
 //   VITE_EMAILJS_SERVICE_ID   — your EmailJS Service ID
 //   VITE_EMAILJS_PUBLIC_KEY   — your EmailJS Public (User) Key
 //   VITE_EMAILJS_TEMPLATE_ID  — a template with: {{to_email}}, {{title}}, {{message}}, {{cc_email}}
-//   VITE_EMAILJS_CC_EMAIL      — workflow CC recipient (OTP/security emails are excluded)
+//   VITE_EMAILJS_CC_EMAIL      — CC recipient used only for the SSCS Study Approved email
 
 const SERVICE_ID  = ((import.meta.env.VITE_EMAILJS_SERVICE_ID as string | undefined)?.trim() || "service_9f81sqq") as string | undefined;
 const PUBLIC_KEY  = ((import.meta.env.VITE_EMAILJS_PUBLIC_KEY as string | undefined)?.trim() || "AAzjcb2oDP4JGVqnb") as string | undefined;
@@ -27,15 +27,29 @@ export const adminNotificationEmails = Array.from(new Set([
   "narudech.s@pttlng.com",
 ]));
 
+function normalizeRecipients(value: string | string[]): string {
+  const raw = Array.isArray(value) ? value : [value];
+  return Array.from(new Set(raw
+    .flatMap(item => item.split(/[;,]/g))
+    .map(item => item.trim())
+    .filter(Boolean)))
+    .join(", ");
+}
+
 async function send(
-  toEmail: string,
+  toEmail: string | string[],
   subject: string,
   message: string,
   fromName = "LMPT2 SSCS System",
-  includeWorkflowCc = true,
+  includeWorkflowCc = false,
 ): Promise<void> {
+  const recipientEmail = normalizeRecipients(toEmail);
+  if (!recipientEmail) {
+    console.info("[LMPT2 Email — no recipient]", { subject, message });
+    return;
+  }
   if (!configured) {
-    console.info("[LMPT2 Email — not configured]", { toEmail, ccEmail: includeWorkflowCc ? workflowCcEmail : "", subject, message });
+    console.info("[LMPT2 Email — not configured]", { toEmail: recipientEmail, ccEmail: includeWorkflowCc ? workflowCcEmail : "", subject, message });
     return;
   }
   try {
@@ -43,11 +57,11 @@ async function send(
       SERVICE_ID!,
       TEMPLATE_ID!,
       {
-        to_email: toEmail,                                      // → To Email: {{to_email}}
+        to_email: recipientEmail,                               // → To Email: {{to_email}} (supports multi-recipient list)
         cc_email: includeWorkflowCc ? workflowCcEmail : "",     // → Cc: {{cc_email}}
         title:    subject,                                      // → Subject: {{title}}
         name:     fromName,                                     // → From Name: {{name}}
-        email:    toEmail,                                      // → Reply To: {{email}}
+        email:    recipientEmail,                               // → Reply To: {{email}}
         message,                                                // → Content: {{message}}
       },
       PUBLIC_KEY!,
@@ -93,7 +107,7 @@ export async function notifyTerminalOfficerAccessRequest(opts: {
   vesselName: string;
   requesterName: string;
   requesterEmail: string;
-  terminalEmail: string;
+  terminalEmail: string | string[];
 }) {
   await send(
     opts.terminalEmail,
@@ -129,7 +143,7 @@ export async function notifyShipOfficerAccessRejected(opts: {
 export async function notifyTerminalOfficerStudySubmitted(opts: {
   vesselName: string;
   submitterName: string;
-  terminalEmail: string;
+  terminalEmail: string | string[];
 }) {
   await send(
     opts.terminalEmail,
@@ -147,6 +161,8 @@ export async function notifyShipOfficerStudyApproved(opts: {
     opts.shipEmail,
     `SSCS Study Approved — ${opts.vesselName}`,
     `Your SSCS compatibility study has been approved.\n\nVessel      : ${opts.vesselName}\nApproved by : ${opts.approvedByName}\n\nThe study is now locked and on record.`,
+    "LMPT2 SSCS System",
+    true,
   );
 }
 
@@ -178,7 +194,7 @@ export async function notifyTerminalOfficerEditRequested(opts: {
   vesselName: string;
   requesterName: string;
   requesterEmail: string;
-  terminalEmail: string;
+  terminalEmail: string | string[];
 }) {
   await send(
     opts.terminalEmail,
@@ -196,6 +212,41 @@ export async function notifyShipOfficerEditRejected(opts: {
     opts.shipEmail,
     `Edit Request Rejected — ${opts.vesselName}`,
     `Your request to edit the approved SSCS study has been rejected.\n\nVessel      : ${opts.vesselName}\nRejected by : ${opts.rejectedByName}\n\nThe approved study remains locked. Please contact the Terminal Officer if further clarification is required.`,
+  );
+}
+
+
+export async function notifyTerminalOfficerVesselAccessRequest(opts: {
+  vesselName: string;
+  requesterName: string;
+  requesterEmail: string;
+  requestType: "claim" | "additional" | "handover";
+  reason?: string;
+  terminalEmail: string | string[];
+}) {
+  const typeLabel = opts.requestType === "claim"
+    ? "Claim Existing Vessel"
+    : opts.requestType === "handover"
+      ? "Ship Officer Handover"
+      : "Additional Ship Officer Access";
+  await send(
+    opts.terminalEmail,
+    `Vessel Access Request — ${opts.vesselName}`,
+    `A Ship Officer has requested vessel access.\n\nVessel       : ${opts.vesselName}\nRequest type : ${typeLabel}\nRequested by : ${opts.requesterName} (${opts.requesterEmail})${opts.reason ? `\nReason        : ${opts.reason}` : ""}\n\nPlease log in to the LMPT2 SSCS system to approve or reject this request.`,
+  );
+}
+
+export async function notifyShipOfficerVesselAccessReviewed(opts: {
+  vesselName: string;
+  status: "approved" | "rejected";
+  reviewedByName: string;
+  shipEmail: string;
+}) {
+  const approved = opts.status === "approved";
+  await send(
+    opts.shipEmail,
+    `Vessel Access ${approved ? "Approved" : "Rejected"} — ${opts.vesselName}`,
+    `${approved ? "Your vessel access request has been approved." : "Your vessel access request has been rejected."}\n\nVessel      : ${opts.vesselName}\nReviewed by : ${opts.reviewedByName}\n\n${approved ? "You can now open the vessel and work on its SSCS study according to the current study status." : "Please contact the Terminal Officer if further clarification is required."}`,
   );
 }
 
