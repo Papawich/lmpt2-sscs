@@ -24,7 +24,13 @@ export type DocKey =
   | "d_6_1"
   | "d_7_1" | "d_7_2" | "d_7_3" | "d_7_4" | "d_7_5" | "d_7_6";
 
-export type RequiredDocumentsData = Record<DocKey, UploadedFile[]>;
+export type RequiredDocumentsData = Record<DocKey, UploadedFile[]> & {
+  notApplicable?: Partial<Record<DocKey, boolean>>;
+  qualityUpdateFlags?: {
+    pAndIFileId?: string;
+    pAndIInvalidValidDate?: string;
+  };
+};
 
 // ─── Defaults ─────────────────────────────────────────────────────────────────
 
@@ -41,7 +47,11 @@ const OPTIONAL_QUALITY_KEYS: DocKey[] = ["d_7_3", "d_7_4", "d_7_5"];
 const ALL_KEYS: DocKey[] = [...BASE_KEYS, "d_6_1", ...OPTIONAL_QUALITY_KEYS];
 
 export function defaultRequiredDocumentsData(): RequiredDocumentsData {
-  return Object.fromEntries(ALL_KEYS.map(k => [k, []])) as RequiredDocumentsData;
+  return {
+    ...(Object.fromEntries(ALL_KEYS.map(k => [k, []])) as Record<DocKey, UploadedFile[]>),
+    notApplicable: {},
+    qualityUpdateFlags: {},
+  };
 }
 
 export function isRequiredDocumentsComplete(data: RequiredDocumentsData | undefined, sisterShip = false): boolean {
@@ -225,6 +235,16 @@ export function RequiredDocumentsSection({
     }
   }
 
+  function setNotApplicable(key: DocKey, checked: boolean) {
+    onChange({
+      ...data,
+      notApplicable: {
+        ...(data.notApplicable ?? {}),
+        [key]: checked,
+      },
+    });
+  }
+
   // Sister Ship Statement is always visible. It is required for vessels declared as
   // sister ships, and optional for other vessels so the statement can be added or
   // updated later when new sister-ship relationships are established.
@@ -288,6 +308,7 @@ export function RequiredDocumentsSection({
                 {group.items.map(({ key, num, label }) => {
                   const files = data[key] ?? [];
                   const hasFiles = files.length > 0;
+                  const isNotApplicable = key === "d_7_3" && Boolean(data.notApplicable?.[key]);
                   const isInherited = sisterShipVerified && inherited.has(key);
                   // The Sister Ship Statement must stay editable (subject to the normal
                   // study edit permission) even after sister-ship verification, because
@@ -295,11 +316,11 @@ export function RequiredDocumentsSection({
                   const isLocked = isInherited;
 
                   return (
-                    <div key={key} className={`px-4 py-3 transition-colors ${hasFiles ? "bg-emerald-500/[0.03]" : ""}`}>
+                    <div key={key} className={`px-4 py-3 transition-colors ${hasFiles ? "bg-emerald-500/[0.03]" : isNotApplicable ? "bg-slate-500/[0.03]" : ""}`}>
                       <div className="flex items-start gap-3">
                         {/* Status dot + number */}
                         <div className="flex items-center gap-2 mt-0.5 shrink-0 w-10">
-                          <div className={`w-2 h-2 rounded-full shrink-0 ${hasFiles ? "bg-emerald-400" : "bg-border"}`} />
+                          <div className={`w-2 h-2 rounded-full shrink-0 ${hasFiles ? "bg-emerald-400" : isNotApplicable ? "bg-slate-400" : "bg-border"}`} />
                           <span className="font-mono text-[10px] text-muted-foreground">{num}</span>
                         </div>
 
@@ -317,6 +338,22 @@ export function RequiredDocumentsSection({
                             )}
                             {OPTIONAL_QUALITY_KEYS.includes(key) && (
                               <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-amber-500/25 bg-amber-500/8 text-amber-400">Optional / if available</span>
+                            )}
+                            {key === "d_7_3" && (
+                              <label className={`flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
+                                isNotApplicable
+                                  ? "border-slate-500/30 bg-slate-500/10 text-slate-500"
+                                  : "border-border text-muted-foreground"
+                              } ${canEdit && !isLocked && !hasFiles ? "cursor-pointer" : "cursor-not-allowed opacity-70"}`}>
+                                <input
+                                  type="checkbox"
+                                  checked={isNotApplicable}
+                                  disabled={!canEdit || isLocked || hasFiles}
+                                  onChange={event => setNotApplicable(key, event.target.checked)}
+                                  className="h-3 w-3 accent-slate-500"
+                                />
+                                N/A
+                              </label>
                             )}
                           </div>
 
@@ -350,7 +387,7 @@ export function RequiredDocumentsSection({
                           )}
 
                           {/* Upload button */}
-                          {canEdit && !isLocked && (
+                          {canEdit && !isLocked && !isNotApplicable && (
                             <button
                               onClick={() => triggerUpload(key)}
                               disabled={loading}
@@ -386,7 +423,10 @@ export function RequiredDocumentsSection({
                           )}
 
                           {/* Read-only empty state */}
-                          {(!canEdit || isLocked) && !hasFiles && (
+                          {isNotApplicable && !hasFiles && (
+                            <span className="font-mono text-[11px] text-slate-500">Not applicable</span>
+                          )}
+                          {(!canEdit || isLocked) && !hasFiles && !isNotApplicable && (
                             <span className="font-mono text-[11px] text-muted-foreground/50">
                               {isInherited ? "No document available on the reference ship" : "No document uploaded"}
                             </span>
@@ -394,9 +434,11 @@ export function RequiredDocumentsSection({
                         </div>
 
                         {/* Completion badge */}
-                        {hasFiles && (
+                        {hasFiles ? (
                           <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                        )}
+                        ) : isNotApplicable ? (
+                          <span className="font-mono text-[9px] font-bold text-slate-500 border border-slate-400/40 rounded px-1.5 py-0.5 shrink-0">N/A</span>
+                        ) : null}
                       </div>
                     </div>
                   );

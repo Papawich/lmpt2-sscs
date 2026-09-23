@@ -34,6 +34,8 @@ export interface ShipShoreLinkData {
   esd1Items: string[];
   opticalSignalArrangement: OpticalSignalArrangementRow[];
   electricSignalArrangement: ElectricSignalArrangementRow[];
+  opticalComplyWithShore?: boolean;
+  electricComplyWithShore?: boolean;
 }
 
 const ESD1_COUNT = 15;
@@ -71,6 +73,8 @@ export function defaultShipShoreLinkData(): ShipShoreLinkData {
     esd1Items: Array(ESD1_COUNT).fill(""),
     opticalSignalArrangement: defaultOpticalSignalArrangement(),
     electricSignalArrangement: defaultElectricSignalArrangement(),
+    opticalComplyWithShore: false,
+    electricComplyWithShore: false,
   };
 }
 
@@ -225,10 +229,14 @@ const OPTICAL_DIRECTION_OPTIONS: OpticalDirectionOption[] = ["", "Ship to Shore"
 function OpticalSignalArrangementTable({
   rows,
   canEdit,
+  compliesWithShore,
+  onComplyChange,
   onChange,
 }: {
   rows: OpticalSignalArrangementRow[];
   canEdit: boolean;
+  compliesWithShore: boolean;
+  onComplyChange: (checked: boolean) => void;
   onChange: (rows: OpticalSignalArrangementRow[]) => void;
 }) {
   const updateSignal = (index: number, value: OpticalSignalOption) => {
@@ -241,8 +249,20 @@ function OpticalSignalArrangementTable({
 
   return (
     <div className="px-5 pb-5">
-      <div className="font-mono text-xs font-bold italic text-foreground mb-2">
-        Table 1. Optical Fiber System Signal Arrangement (Shore Side / Ship Side)
+      <div className="flex items-center justify-between gap-3 mb-2 flex-wrap">
+        <div className="font-mono text-xs font-bold italic text-foreground">
+          Table 1. Optical Fiber System Signal Arrangement (Shore Side / Ship Side)
+        </div>
+        <label className={`flex items-center gap-2 rounded border px-3 py-1.5 font-mono text-[11px] ${canEdit ? "cursor-pointer border-emerald-500/30 bg-emerald-500/5 text-emerald-500" : "border-border text-muted-foreground"}`}>
+          <input
+            type="checkbox"
+            checked={compliesWithShore}
+            disabled={!canEdit}
+            onChange={event => onComplyChange(event.target.checked)}
+            className="h-3.5 w-3.5 accent-emerald-500"
+          />
+          Comply with Shore Side
+        </label>
       </div>
       <div className="overflow-x-auto border border-border rounded">
         <table className="w-full min-w-[780px] text-xs border-collapse">
@@ -271,8 +291,9 @@ function OpticalSignalArrangementTable({
                     {canEdit ? (
                       <select
                         value={row.shipSideSignal}
+                        disabled={compliesWithShore}
                         onChange={e => updateSignal(i, e.target.value as OpticalSignalOption)}
-                        className={yi}
+                        className={`${yi} disabled:bg-emerald-50 disabled:text-emerald-800 disabled:border-emerald-300 disabled:cursor-not-allowed`}
                       >
                         {OPTICAL_SIGNAL_OPTIONS.map(option => <option key={option || "blank"} value={option}>{option || "Select..."}</option>)}
                       </select>
@@ -284,8 +305,9 @@ function OpticalSignalArrangementTable({
                     {canEdit ? (
                       <select
                         value={row.shipSideDirection}
+                        disabled={compliesWithShore}
                         onChange={e => updateDirection(i, e.target.value as OpticalDirectionOption)}
-                        className={yi}
+                        className={`${yi} disabled:bg-emerald-50 disabled:text-emerald-800 disabled:border-emerald-300 disabled:cursor-not-allowed`}
                       >
                         {OPTICAL_DIRECTION_OPTIONS.map(option => <option key={option || "blank"} value={option}>{option || "Select..."}</option>)}
                       </select>
@@ -306,10 +328,14 @@ function OpticalSignalArrangementTable({
 function ElectricSignalArrangementTable({
   rows,
   canEdit,
+  compliesWithShore,
+  onComplyChange,
   onChange,
 }: {
   rows: ElectricSignalArrangementRow[];
   canEdit: boolean;
+  compliesWithShore: boolean;
+  onComplyChange: (checked: boolean) => void;
   onChange: (rows: ElectricSignalArrangementRow[]) => void;
 }) {
   const update = (index: number, key: keyof ElectricSignalArrangementRow, value: string) => {
@@ -318,8 +344,20 @@ function ElectricSignalArrangementTable({
 
   return (
     <div className="px-5 pb-5">
-      <div className="font-mono text-xs font-bold italic text-foreground mb-2">
-        Table 2. Electric System Signal Arrangement (Shore Side / Ship Side)
+      <div className="flex items-center justify-between gap-3 mb-2 flex-wrap">
+        <div className="font-mono text-xs font-bold italic text-foreground">
+          Table 2. Electric System Signal Arrangement (Shore Side / Ship Side)
+        </div>
+        <label className={`flex items-center gap-2 rounded border px-3 py-1.5 font-mono text-[11px] ${canEdit ? "cursor-pointer border-emerald-500/30 bg-emerald-500/5 text-emerald-500" : "border-border text-muted-foreground"}`}>
+          <input
+            type="checkbox"
+            checked={compliesWithShore}
+            disabled={!canEdit}
+            onChange={event => onComplyChange(event.target.checked)}
+            className="h-3.5 w-3.5 accent-emerald-500"
+          />
+          Comply with Shore Side
+        </label>
       </div>
       <div className="overflow-x-auto border border-border rounded">
         <table className="w-full min-w-[760px] text-xs border-collapse">
@@ -345,9 +383,10 @@ function ElectricSignalArrangementTable({
                       <input
                         type="text"
                         value={row.shipPinNo}
+                        disabled={compliesWithShore}
                         onChange={e => update(i, "shipPinNo", e.target.value)}
                         placeholder="Enter ship pin no."
-                        className={yi}
+                        className={`${yi} disabled:bg-emerald-50 disabled:text-emerald-800 disabled:border-emerald-300 disabled:cursor-not-allowed`}
                       />
                     ) : (
                       <span className={ro}>{row.shipPinNo || "—"}</span>
@@ -358,9 +397,10 @@ function ElectricSignalArrangementTable({
                       <input
                         type="text"
                         value={row.shipSide}
+                        disabled={compliesWithShore}
                         onChange={e => update(i, "shipSide", e.target.value)}
                         placeholder="Enter ship-side signal / function"
-                        className={yi}
+                        className={`${yi} disabled:bg-emerald-50 disabled:text-emerald-800 disabled:border-emerald-300 disabled:cursor-not-allowed`}
                       />
                     ) : (
                       <span className={ro}>{row.shipSide || "—"}</span>
@@ -374,6 +414,21 @@ function ElectricSignalArrangementTable({
       </div>
     </div>
   );
+}
+
+function opticalRowsComplyingWithShore(): OpticalSignalArrangementRow[] {
+  return OPTICAL_SHORE_SIDE_ROWS.map(row => ({
+    shipSideSignal: row.signal === "Telephone Channel" ? "Telephon Chanel" : row.signal === "ESD Channel" ? "ESD Chanel" : "Spare",
+    shipSideDirection: row.direction === "Ship > Shore" ? "Ship to Shore" : "Shore to Ship",
+  }));
+}
+
+function electricRowsComplyingWithShore(): ElectricSignalArrangementRow[] {
+  return ELECTRIC_SHORE_SIDE_ROWS.map(row => ({
+    shoreSide: row.shoreSide,
+    shipPinNo: row.pin,
+    shipSide: row.shoreSide,
+  }));
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -403,6 +458,8 @@ export function ShipShoreLinkSection({ canEdit, data: dataProp, onChange }: Prop
         shoreSide: ELECTRIC_SHORE_SIDE_ROWS[i]?.shoreSide ?? row.shoreSide ?? "",
       }))
     : defaultElectricSignalArrangement();
+  const opticalComplyWithShore = Boolean(data.opticalComplyWithShore);
+  const electricComplyWithShore = Boolean(data.electricComplyWithShore);
 
   const sysComplete = (s: SSLSystemData) =>
     !!s.manufacturer && !!s.connectionType && !!s.boxDistance && !!s.boxDirection;
@@ -454,6 +511,12 @@ export function ShipShoreLinkSection({ canEdit, data: dataProp, onChange }: Prop
           <OpticalSignalArrangementTable
             rows={opticalSignals}
             canEdit={canEdit}
+            compliesWithShore={opticalComplyWithShore}
+            onComplyChange={checked => onChange({
+              ...data,
+              opticalComplyWithShore: checked,
+              opticalSignalArrangement: checked ? opticalRowsComplyingWithShore() : opticalSignals,
+            })}
             onChange={rows => onChange({ ...data, opticalSignalArrangement: rows })}
           />
         </>
@@ -470,6 +533,12 @@ export function ShipShoreLinkSection({ canEdit, data: dataProp, onChange }: Prop
           <ElectricSignalArrangementTable
             rows={electricSignals}
             canEdit={canEdit}
+            compliesWithShore={electricComplyWithShore}
+            onComplyChange={checked => onChange({
+              ...data,
+              electricComplyWithShore: checked,
+              electricSignalArrangement: checked ? electricRowsComplyingWithShore() : electricSignals,
+            })}
             onChange={rows => onChange({ ...data, electricSignalArrangement: rows })}
           />
         </>

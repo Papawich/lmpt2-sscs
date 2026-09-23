@@ -17,7 +17,7 @@ import {
   notifyTerminalOfficerStudySubmitted,
   notifyShipOfficerStudyApproved,
   notifyShipOfficerEditApproved,
-  notifyShipOfficerRevisionRequested,
+  notifyShipOfficerStudyFeedback,
   notifyTerminalOfficerEditRequested,
   notifyShipOfficerEditRejected,
   notifyTerminalOfficerVesselAccessRequest,
@@ -260,6 +260,25 @@ const CHECKLIST_TEMPLATE: { section: string; items: TemplateItem[] }[] = [
   { section: "Quality Assessment",               items: [] },
 ];
 
+const FEEDBACK_PART_OPTIONS = CHECKLIST_TEMPLATE.map(section => section.section);
+
+const FEEDBACK_SECTION_STORAGE_KEYS: Record<string, string[]> = {
+  "Required Documents": ["required_documents"],
+  "General Information": ["__core__"],
+  "Fender / Flat Body": ["flat_body", "fender_reaction", "berthing_energy"],
+  "Mooring Arrangement": ["mooring_arrangement"],
+  "Gangway": ["gangway"],
+  "Unloading Arm": ["unloading_arm"],
+  "Cargo Management": ["cargo_management"],
+  "Ship Shore Link System": ["ship_shore_link"],
+  "CTMS": ["ctms"],
+  "Short Distance Pieces (SDPs)": ["sdp"],
+  "Utility System": ["utility"],
+  "Attachment": ["attachments"],
+  // Quality Assessment can replace Required Document 7.1 P&I while correcting an invalid certificate.
+  "Quality Assessment": ["quality_assessment", "required_documents"],
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // TYPES
 // ─────────────────────────────────────────────────────────────────────────────
@@ -287,6 +306,27 @@ interface WorkflowMetaData {
 
 function defaultWorkflowMetaData(): WorkflowMetaData {
   return {};
+}
+
+type FeedbackAssessment = "invalid" | "unacceptable";
+
+interface TerminalFeedbackItem {
+  section: string;
+  assessment: FeedbackAssessment;
+  sectionKeys: string[];
+}
+
+interface TerminalFeedbackData {
+  status: "none" | "open" | "closed";
+  items: TerminalFeedbackItem[];
+  message: string;
+  sentById?: string;
+  sentByName?: string;
+  sentAt?: string;
+}
+
+function defaultTerminalFeedbackData(): TerminalFeedbackData {
+  return { status: "none", items: [], message: "" };
 }
 
 interface StudyItem {
@@ -319,6 +359,7 @@ interface SSCSStudy {
   attachmentData: AttachmentData;
   qualityAssessmentData: QualityAssessmentData;
   workflowMetaData: WorkflowMetaData;
+  feedbackData: TerminalFeedbackData;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -349,6 +390,7 @@ const CLOUD_STUDY_DEFAULTS: Record<string, () => any> = {
   attachmentData: defaultAttachmentData,
   qualityAssessmentData: defaultQualityAssessmentData,
   workflowMetaData: defaultWorkflowMetaData,
+  feedbackData: defaultTerminalFeedbackData,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -403,6 +445,7 @@ function blankStudy(vessel: Vessel, user: UserAccount, prev?: SSCSStudy, initial
     workflowMetaData: user.role === "terminal_officer"
       ? { terminalOfficerId: user.id, terminalOfficerName: user.name, assignedAt: new Date().toISOString() }
       : prev?.workflowMetaData ?? defaultWorkflowMetaData(),
+    feedbackData: defaultTerminalFeedbackData(),
   };
 }
 
@@ -925,6 +968,9 @@ export default function App() {
   const [accessRequestBusy, setAccessRequestBusy] = useState(false);
   const [accessReviewBusyId, setAccessReviewBusyId] = useState<string | null>(null);
   const [revokePreviousOnApprove, setRevokePreviousOnApprove] = useState<Record<string, boolean>>({});
+  const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false);
+  const [feedbackMessage, setFeedbackMessage] = useState("");
+  const [feedbackParts, setFeedbackParts] = useState<Record<string, FeedbackAssessment | undefined>>({});
 
   // ── Login state ─────────────────────────────────────────────────────────────
   const [loginEmail, setLoginEmail]     = useState("");
@@ -1430,7 +1476,20 @@ export default function App() {
     if (!supabaseConfigured || !currentUser) return;
     const existing = studySaveTimers.current[updated.id];
     if (existing) clearTimeout(existing);
-    const write = () => saveCloudStudy(updated, currentUser.id).catch(err => {
+    const feedbackShipEdit = currentUser.role === "ship_officer"
+      && updated.status === "submitted"
+      && updated.feedbackData?.status === "open";
+    const feedbackKeys = feedbackShipEdit
+      ? Array.from(new Set(updated.feedbackData.items.flatMap(item => item.sectionKeys ?? []).filter(key => key !== "__core__")))
+      : undefined;
+    const updateCore = feedbackShipEdit
+      ? updated.feedbackData.items.some(item => (item.sectionKeys ?? []).includes("__core__"))
+      : undefined;
+    const write = () => saveCloudStudy(
+      updated,
+      currentUser.id,
+      feedbackShipEdit ? { sectionKeys: feedbackKeys, updateCore } : undefined,
+    ).catch(err => {
       console.error("[Study save failed]", err);
       showToast("Cloud save failed. Your latest change is still visible locally.", "error");
     });
@@ -1553,12 +1612,22 @@ export default function App() {
     syncStudy({ ...activeStudy, qualityAssessmentData: data });
   }
 
+  function updateQualityAndRequiredDocuments(data: QualityAssessmentData, requiredDocuments: RequiredDocumentsData) {
+    if (!activeStudy) return;
+    syncStudy({ ...activeStudy, qualityAssessmentData: data, requiredDocuments });
+  }
+
   async function handleDocumentUpload(docKey: string, file: File): Promise<UploadedFile> {
     if (!supabaseConfigured || !activeStudy || !currentUser) {
       throw new Error("Cloud document storage is not available in local-preview mode.");
     }
     // Ensure the parent study exists before Storage RLS evaluates the upload path.
-    await saveCloudStudy(activeStudy, currentUser.id);
+    // During submitted-feedback correction the parent already exists and Ship Officer
+    // is intentionally allowed to update only the selected feedback sections.
+    const feedbackShipEdit = currentUser.role === "ship_officer"
+      && activeStudy.status === "submitted"
+      && activeStudy.feedbackData?.status === "open";
+    if (!feedbackShipEdit) await saveCloudStudy(activeStudy, currentUser.id);
     return uploadStudyDocument({ studyId: activeStudy.id, docKey, file, userId: currentUser.id });
   }
 
@@ -1988,6 +2057,79 @@ export default function App() {
     }).catch(err => console.error("[Edit rejection email failed]", err));
   }
 
+  function openStudyFeedbackDialog() {
+    if (!activeStudy || !currentUser || currentUser.role !== "terminal_officer") return;
+    const previous = activeStudy.feedbackData?.status === "open" ? activeStudy.feedbackData : defaultTerminalFeedbackData();
+    setFeedbackMessage(previous.message ?? "");
+    setFeedbackParts(Object.fromEntries(previous.items.map(item => [item.section, item.assessment])));
+    setFeedbackDialogOpen(true);
+  }
+
+  function sendStudyFeedback() {
+    if (!activeStudy || !currentUser || currentUser.role !== "terminal_officer") return;
+    const items: TerminalFeedbackItem[] = FEEDBACK_PART_OPTIONS.flatMap(section => {
+      const assessment = feedbackParts[section];
+      return assessment ? [{ section, assessment, sectionKeys: FEEDBACK_SECTION_STORAGE_KEYS[section] ?? [] }] : [];
+    });
+    const message = feedbackMessage.trim();
+    if (items.length === 0) {
+      showToast("Select at least one part for feedback.", "error");
+      return;
+    }
+    if (!message) {
+      showToast("Please enter feedback details for the Ship Officer.", "error");
+      return;
+    }
+
+    // Feedback must always go to an actual approved Ship Officer, never to the
+    // latest generic requester / Terminal / Admin account. Prefer the Ship Officer
+    // who submitted this study; fall back to the original Ship Officer, then the
+    // most recently approved Ship Officer with access to this vessel.
+    const submittedShipOfficer = users.find(user =>
+      user.id === activeStudy.submittedById
+      && user.role === "ship_officer"
+      && user.status === "approved"
+    );
+    const initiatedShipOfficer = users.find(user =>
+      user.id === activeStudy.initiatedById
+      && user.role === "ship_officer"
+      && user.status === "approved"
+    );
+    const accessShipOfficer = approvedVesselAccesses(activeStudy.vesselId)
+      .slice()
+      .sort((a, b) => new Date(b.reviewedAt ?? b.requestedAt).getTime() - new Date(a.reviewedAt ?? a.requestedAt).getTime())
+      .map(access => users.find(user => user.id === access.userId && user.role === "ship_officer" && user.status === "approved"))
+      .find((user): user is UserAccount => Boolean(user));
+    const shipUser = submittedShipOfficer ?? initiatedShipOfficer ?? accessShipOfficer;
+
+    if (!shipUser) {
+      showToast("No approved Ship Officer is assigned to this vessel. Feedback was not sent.", "error");
+      return;
+    }
+
+    const feedbackData: TerminalFeedbackData = {
+      status: "open",
+      items,
+      message,
+      sentById: currentUser.id,
+      sentByName: currentUser.name,
+      sentAt: new Date().toISOString(),
+    };
+    const updatedStudy = assignTerminalOfficer({ ...activeStudy, feedbackData }, currentUser);
+    syncStudy(updatedStudy, true);
+
+    void notifyShipOfficerStudyFeedback({
+      vesselName: activeStudy.vesselName,
+      requestedByName: currentUser.name,
+      parts: items,
+      message,
+      shipEmail: shipUser.email,
+    }).catch(err => console.error("[Study feedback email failed]", err));
+
+    setFeedbackDialogOpen(false);
+    showToast(`Feedback sent to Ship Officer ${shipUser.name}. Selected parts are now editable.`, "success");
+  }
+
   function submitStudy() {
     if (!activeStudy || !currentUser) return;
     const studyVessel = vessels.find(v => v.id === activeStudy.vesselId);
@@ -2037,6 +2179,9 @@ export default function App() {
       reviewedById: currentUser.id,
       reviewedByName: currentUser.name,
       approvedAt: new Date().toISOString(),
+      feedbackData: activeStudy.feedbackData?.status === "open"
+        ? { ...activeStudy.feedbackData, status: "closed" }
+        : (activeStudy.feedbackData ?? defaultTerminalFeedbackData()),
     });
     syncStudy(approvedStudy, true);
     showToast("Study approved and locked.", "success");
@@ -2045,19 +2190,6 @@ export default function App() {
       notifyShipOfficerStudyApproved({ vesselName: activeStudy.vesselName, approvedByName: currentUser.name, shipEmail: shipUser.email });
   }
 
-  function requestRevision() {
-    if (!activeStudy || !currentUser) return;
-    syncStudy(assignTerminalOfficer({ ...activeStudy, status: "draft" }, currentUser), true);
-    const shipUser = users.find(u => u.id === (activeStudy.submittedById ?? activeStudy.initiatedById));
-    if (shipUser) {
-      void notifyShipOfficerRevisionRequested({
-        vesselName: activeStudy.vesselName,
-        requestedByName: currentUser.name,
-        shipEmail: shipUser.email,
-      }).catch(err => console.error("[Revision request email failed]", err));
-    }
-    showToast("Revision requested. Study returned to draft.", "info");
-  }
 
   function requestEdit() {
     if (!activeStudy || !currentUser) return;
@@ -3520,13 +3652,19 @@ export default function App() {
     const uid        = currentUser.id;
     const shipHasVesselAccess = isShip && hasApprovedVesselAccess(activeStudy.vesselId, uid);
 
+    const feedbackOpen = activeStudy.feedbackData?.status === "open";
+    const feedbackSectionSelected = Boolean(
+      feedbackOpen && activeStudy.feedbackData?.items.some(item => item.section === studyTab)
+    );
     const canEdit =
       (st === "draft"    && (isTerminal || shipHasVesselAccess)) ||
       (st === "submitted" && isTerminal) ||
-      (st === "approved"  && isTerminal) ||
+      (st === "submitted" && isShip && shipHasVesselAccess && feedbackSectionSelected) ||
       (st === "editing"   && (isTerminal || shipHasVesselAccess));
 
-    const showTerminalFields = isTerminal && (st === "submitted" || st === "approved" || st === "editing");
+    // Once approved, the SSCS content is read-only for every role.
+    // Any further content change must start a new approved Edit cycle first.
+    const showTerminalFields = isTerminal && (st === "submitted" || st === "editing");
     const pct = completionPct(activeStudy);
 
     const vessel = vessels.find(v => v.id === activeStudy.vesselId);
@@ -3598,6 +3736,42 @@ export default function App() {
             </div>
           )}
 
+          {feedbackOpen && activeStudy.feedbackData && (
+            <div className="mb-4 rounded border border-violet-500/30 bg-violet-500/5 px-4 py-3">
+              <div className="flex items-start gap-2.5">
+                <AlertCircle className="w-4 h-4 text-violet-500 mt-0.5 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="font-mono text-[10px] uppercase tracking-widest text-violet-500 font-bold">Terminal Officer Feedback</p>
+                    {activeStudy.feedbackData.sentByName && (
+                      <span className="font-mono text-[10px] text-muted-foreground">by {activeStudy.feedbackData.sentByName}</span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 mt-2">
+                    {activeStudy.feedbackData.items.map(item => (
+                      <button
+                        key={`${item.section}-${item.assessment}`}
+                        type="button"
+                        onClick={() => setStudyTab(item.section)}
+                        className={`font-mono text-[9px] uppercase tracking-wide rounded border px-2 py-1 ${
+                          item.assessment === "invalid"
+                            ? "border-red-500/30 bg-red-500/8 text-red-500"
+                            : "border-amber-500/30 bg-amber-500/8 text-amber-500"
+                        }`}
+                      >
+                        {item.section} · {item.assessment}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-foreground mt-2 whitespace-pre-wrap">{activeStudy.feedbackData.message}</p>
+                  {isShip && (
+                    <p className="font-mono text-[10px] text-violet-500 mt-2">Only the parts listed above are unlocked for correction. Changes are saved automatically while the study remains Submitted.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Action bar */}
           <div className="border border-border rounded bg-card px-5 py-3.5 mb-6 flex flex-wrap gap-2 items-center">
             <p className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest mr-2">Actions:</p>
@@ -3618,19 +3792,11 @@ export default function App() {
               </button>
             )}
 
-            {/* Terminal Officer: request revision */}
+            {/* Terminal Officer: feedback without returning study to Draft */}
             {isTerminal && st === "submitted" && (
-              <button onClick={requestRevision}
-                className="flex items-center gap-1.5 bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors">
-                <RotateCcw className="w-3.5 h-3.5" />Request Revision
-              </button>
-            )}
-
-            {/* Terminal Officer: approved — save edits */}
-            {isTerminal && st === "approved" && (
-              <button onClick={() => showToast("Changes saved by Terminal Officer.", "success")}
-                className="flex items-center gap-1.5 bg-sky-500/10 text-sky-400 border border-sky-500/20 hover:bg-sky-500/20 font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors">
-                <CheckCheck className="w-3.5 h-3.5" />Save Changes
+              <button onClick={openStudyFeedbackDialog}
+                className="flex items-center gap-1.5 bg-violet-500/10 text-violet-500 border border-violet-500/20 hover:bg-violet-500/20 font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors">
+                <AlertCircle className="w-3.5 h-3.5" />{feedbackOpen ? "Update Feedback" : "Feedback"}
               </button>
             )}
 
@@ -3668,10 +3834,80 @@ export default function App() {
             )}
 
             {/* Status messages */}
-            {isShip && st === "submitted" && <p className="text-xs font-mono text-muted-foreground">Awaiting Terminal Officer review.</p>}
+            {isShip && st === "submitted" && (
+              <p className={`text-xs font-mono ${feedbackOpen ? "text-violet-500" : "text-muted-foreground"}`}>
+                {feedbackOpen ? "Terminal feedback received — open the highlighted parts above to make corrections." : "Awaiting Terminal Officer review."}
+              </p>
+            )}
             {isShip && st === "edit_requested" && uid === activeStudy.editRequestedById && <p className="text-xs font-mono text-amber-400">Edit request pending approval.</p>}
             {role === "viewer" && <p className="text-xs font-mono text-muted-foreground">You have read-only access to this study.</p>}
           </div>
+
+          {feedbackDialogOpen && isTerminal && st === "submitted" && (
+            <div className="fixed inset-0 z-[1000] bg-black/55 flex items-center justify-center p-4">
+              <div className="w-full max-w-2xl max-h-[88vh] overflow-hidden rounded-lg border border-border bg-card shadow-2xl">
+                <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+                  <div>
+                    <p className="font-mono text-xs font-bold uppercase tracking-widest text-violet-500">Send Feedback to Ship Officer</p>
+                    <p className="text-xs text-muted-foreground mt-1">Select the affected part(s), mark each as Invalid or Unacceptable, and describe what must be corrected. The study will remain Submitted.</p>
+                  </div>
+                  <button type="button" onClick={() => setFeedbackDialogOpen(false)} className="text-muted-foreground hover:text-foreground"><X className="w-4 h-4" /></button>
+                </div>
+
+                <div className="p-5 space-y-4 overflow-y-auto max-h-[68vh]">
+                  <div className="space-y-1.5">
+                    {FEEDBACK_PART_OPTIONS.map(section => {
+                      const assessment = feedbackParts[section];
+                      const selected = Boolean(assessment);
+                      return (
+                        <div key={section} className={`flex items-center gap-3 rounded border px-3 py-2 ${selected ? "border-violet-500/30 bg-violet-500/5" : "border-border"}`}>
+                          <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={event => setFeedbackParts(prev => ({
+                                ...prev,
+                                [section]: event.target.checked ? (prev[section] ?? "invalid") : undefined,
+                              }))}
+                              className="h-3.5 w-3.5 accent-violet-500"
+                            />
+                            <span className="font-mono text-xs text-foreground truncate">{section}</span>
+                          </label>
+                          <select
+                            value={assessment ?? "invalid"}
+                            disabled={!selected}
+                            onChange={event => setFeedbackParts(prev => ({ ...prev, [section]: event.target.value as FeedbackAssessment }))}
+                            className="rounded border border-border bg-background px-2 py-1.5 font-mono text-[10px] uppercase text-foreground disabled:opacity-40"
+                          >
+                            <option value="invalid">Invalid</option>
+                            <option value="unacceptable">Unacceptable</option>
+                          </select>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div>
+                    <label className="block font-mono text-[10px] uppercase tracking-widest text-muted-foreground mb-1.5">Feedback / Required Correction</label>
+                    <textarea
+                      value={feedbackMessage}
+                      onChange={event => setFeedbackMessage(event.target.value)}
+                      rows={5}
+                      placeholder="Describe exactly what must be corrected or updated..."
+                      className="w-full rounded border border-yellow-400 bg-yellow-100 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-500 focus:outline-none focus:border-yellow-500 focus:ring-1 focus:ring-yellow-400"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
+                  <button type="button" onClick={() => setFeedbackDialogOpen(false)} className="rounded border border-border px-4 py-2 font-mono text-xs text-muted-foreground hover:bg-secondary">Cancel</button>
+                  <button type="button" onClick={sendStudyFeedback} className="flex items-center gap-1.5 rounded bg-violet-600 px-4 py-2 font-mono text-xs font-bold uppercase tracking-wide text-white hover:bg-violet-700">
+                    <Send className="w-3.5 h-3.5" />Send Feedback
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Checklist — tab navigation */}
           <div className="mb-2 overflow-x-auto">
@@ -3698,7 +3934,7 @@ export default function App() {
                   : isAttachmentTab
                   ? isAttachmentComplete(activeStudy.attachmentData)
                   : isQualityTab
-                  ? isQualityAssessmentComplete(activeStudy.qualityAssessmentData)
+                  ? isQualityAssessmentComplete(activeStudy.qualityAssessmentData, activeStudy.requiredDocuments)
                   : isFenderTab
                   ? isFenderFlatBodyComplete(activeStudy.flatBodyData, activeStudy.fenderReactionData)
                   : isMooringTab
@@ -3784,6 +4020,12 @@ export default function App() {
                   canEdit={canEdit}
                   data={activeStudy.qualityAssessmentData ?? defaultQualityAssessmentData()}
                   onChange={updateQualityAssessmentData}
+                  requiredDocuments={activeStudy.requiredDocuments ?? defaultRequiredDocumentsData()}
+                  onRequiredDocumentsChange={updateRequiredDocuments}
+                  onQualityAndRequiredDocumentsChange={updateQualityAndRequiredDocuments}
+                  onUploadFile={supabaseConfigured ? handleDocumentUpload : undefined}
+                  onDeleteFile={supabaseConfigured ? handleDocumentDelete : undefined}
+                  getDownloadUrl={supabaseConfigured ? handleDocumentDownload : undefined}
                 />
               );
             }

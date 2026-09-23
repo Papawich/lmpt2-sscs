@@ -1,3 +1,7 @@
+import { useEffect, useRef, useState } from "react";
+import { CheckCircle2, Download, Loader2, Upload, X } from "lucide-react";
+import type { RequiredDocumentsData, UploadedFile } from "./RequiredDocumentsSection";
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface CertificateAssessmentRow {
@@ -9,6 +13,17 @@ export interface InspectionAssessmentRow {
   date: string;
   place: string;
   by: string;
+  notApplicable?: boolean;
+}
+
+export interface QualityCertificateEvidence {
+  shipSanitation: UploadedFile[];
+  /** Expired date that opened the current P&I replacement cycle. */
+  pAndIInvalidValidDate?: string;
+  /** Expired date that opened the current Ship Sanitation replacement cycle. */
+  shipSanitationInvalidValidDate?: string;
+  pAndIReplacementRequired?: boolean;
+  shipSanitationReplacementRequired?: boolean;
 }
 
 export interface QualityAssessmentData {
@@ -31,6 +46,7 @@ export interface QualityAssessmentData {
     flagState: InspectionAssessmentRow;
     sire: InspectionAssessmentRow;
   };
+  certificateEvidence?: QualityCertificateEvidence;
 }
 
 // ─── Date helpers ──────────────────────────────────────────────────────────────
@@ -125,7 +141,7 @@ function formatDisplayDate(value: string): string {
 // ─── Defaults / completion ────────────────────────────────────────────────────
 
 const blankCertificate = (): CertificateAssessmentRow => ({ issueDate: "", validDate: "" });
-const blankInspection = (): InspectionAssessmentRow => ({ date: "", place: "", by: "" });
+const blankInspection = (): InspectionAssessmentRow => ({ date: "", place: "", by: "", notApplicable: false });
 
 export function defaultQualityAssessmentData(): QualityAssessmentData {
   return {
@@ -148,6 +164,7 @@ export function defaultQualityAssessmentData(): QualityAssessmentData {
       flagState: blankInspection(),
       sire: blankInspection(),
     },
+    certificateEvidence: { shipSanitation: [] },
   };
 }
 
@@ -181,7 +198,10 @@ export function getExpiringCertificateCount(data: QualityAssessmentData | undefi
   }).length;
 }
 
-export function isQualityAssessmentComplete(data: QualityAssessmentData | undefined): boolean {
+export function isQualityAssessmentComplete(
+  data: QualityAssessmentData | undefined,
+  requiredDocuments?: RequiredDocumentsData,
+): boolean {
   const d = data ?? defaultQualityAssessmentData();
   const certificateComplete = (Object.keys(d.certificates) as CertificateKey[]).every(key => {
     const row = d.certificates[key];
@@ -190,9 +210,18 @@ export function isQualityAssessmentComplete(data: QualityAssessmentData | undefi
     return !!row.validDate.trim() && !isExpiredDate(row.validDate);
   });
   const inspectionComplete = (Object.values(d.inspections) as InspectionAssessmentRow[]).every(
-    row => !!row.date.trim() && !!row.place.trim() && !!row.by.trim()
+    row => Boolean(row.notApplicable) || (!!row.date.trim() && !!row.place.trim() && !!row.by.trim())
   );
-  return certificateComplete && inspectionComplete;
+  const evidence = d.certificateEvidence ?? { shipSanitation: [] };
+  const pAndIRecordedUpdate = Boolean(
+    requiredDocuments?.qualityUpdateFlags?.pAndIFileId
+    && (requiredDocuments?.d_7_1 ?? []).some(file => file.id === requiredDocuments.qualityUpdateFlags?.pAndIFileId)
+  );
+  const pAndIReplacementComplete = !evidence.pAndIReplacementRequired
+    && (!evidence.pAndIInvalidValidDate || pAndIRecordedUpdate);
+  const sanitationReplacementComplete = !evidence.shipSanitationReplacementRequired
+    && (!evidence.shipSanitationInvalidValidDate || evidence.shipSanitation.length > 0);
+  return certificateComplete && inspectionComplete && pAndIReplacementComplete && sanitationReplacementComplete;
 }
 
 // ─── Definitions ──────────────────────────────────────────────────────────────
@@ -282,18 +311,118 @@ interface Props {
   canEdit: boolean;
   data: QualityAssessmentData;
   onChange: (data: QualityAssessmentData) => void;
+  requiredDocuments?: RequiredDocumentsData;
+  onRequiredDocumentsChange?: (data: RequiredDocumentsData) => void;
+  onQualityAndRequiredDocumentsChange?: (qualityData: QualityAssessmentData, requiredDocuments: RequiredDocumentsData) => void;
+  onUploadFile?: (docKey: string, file: File) => Promise<UploadedFile>;
+  onDeleteFile?: (file: UploadedFile) => Promise<void>;
+  getDownloadUrl?: (file: UploadedFile) => Promise<string>;
 }
 
-export function QualityAssessmentSection({ canEdit, data: dataProp, onChange }: Props) {
+type EvidenceTarget = "pAndI" | "shipSanitation";
+
+export function QualityAssessmentSection({
+  canEdit, data: dataProp, onChange, requiredDocuments, onRequiredDocumentsChange,
+  onQualityAndRequiredDocumentsChange, onUploadFile, onDeleteFile, getDownloadUrl,
+}: Props) {
   const data = dataProp ?? defaultQualityAssessmentData();
+  const evidenceInputRef = useRef<HTMLInputElement>(null);
+  const [evidenceTarget, setEvidenceTarget] = useState<EvidenceTarget | null>(null);
+  const [evidenceUploading, setEvidenceUploading] = useState(false);
+  const sanitationEvidence = data.certificateEvidence?.shipSanitation ?? [];
+
+  const uploadedAfterInvalidDate = (file: UploadedFile | undefined, invalidValidDate: string | undefined) => {
+    if (!file?.uploadedAt || !invalidValidDate) return false;
+    const iso = normalizeDateValue(invalidValidDate);
+    if (!iso) return false;
+    const [year, month, day] = iso.split("-").map(Number);
+    const expiry = new Date(year, month - 1, day, 23, 59, 59, 999);
+    const uploadedAt = new Date(file.uploadedAt);
+    return !Number.isNaN(uploadedAt.getTime()) && uploadedAt.getTime() > expiry.getTime();
+  };
+
+  const pAndIUpdatedFile = () => {
+    const fileId = requiredDocuments?.qualityUpdateFlags?.pAndIFileId;
+    return (requiredDocuments?.d_7_1 ?? []).find(item => item.id === fileId);
+  };
+
+  // Latch an invalid certificate as soon as it is seen. The original expired date is
+  // preserved as the replacement-cycle reference, so changing Valid Date later cannot
+  // bypass the mandatory updated-certificate upload. Only an upload after that invalid
+  // date can clear the requirement.
+  useEffect(() => {
+    if (!canEdit) return;
+    const evidence = data.certificateEvidence ?? { shipSanitation: [] };
+    const nextEvidence: QualityCertificateEvidence = { ...evidence };
+    let changed = false;
+
+    const pAndIInvalidDate = data.certificates.pAndI?.validDate ?? "";
+    if (isExpiredDate(pAndIInvalidDate)) {
+      const updatedFile = pAndIUpdatedFile();
+      if (!uploadedAfterInvalidDate(updatedFile, pAndIInvalidDate)) {
+        if (!evidence.pAndIReplacementRequired || evidence.pAndIInvalidValidDate !== pAndIInvalidDate) {
+          nextEvidence.pAndIReplacementRequired = true;
+          nextEvidence.pAndIInvalidValidDate = pAndIInvalidDate;
+          changed = true;
+        }
+      }
+    }
+
+    const sanitationInvalidDate = data.certificates.shipSanitation?.validDate ?? "";
+    if (isExpiredDate(sanitationInvalidDate)) {
+      const updatedFile = sanitationEvidence[0];
+      if (!uploadedAfterInvalidDate(updatedFile, sanitationInvalidDate)) {
+        if (!evidence.shipSanitationReplacementRequired || evidence.shipSanitationInvalidValidDate !== sanitationInvalidDate) {
+          nextEvidence.shipSanitationReplacementRequired = true;
+          nextEvidence.shipSanitationInvalidValidDate = sanitationInvalidDate;
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) onChange({ ...data, certificateEvidence: nextEvidence });
+  // Only certificate dates / replacement evidence open a new replacement cycle.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    canEdit,
+    data.certificates.pAndI?.validDate,
+    data.certificates.shipSanitation?.validDate,
+    requiredDocuments?.qualityUpdateFlags?.pAndIFileId,
+    sanitationEvidence[0]?.id,
+  ]);
 
   const setCertificate = (key: CertificateKey, field: keyof CertificateAssessmentRow, value: string) => {
+    const currentRow = data.certificates[key] ?? blankCertificate();
+    const evidence = data.certificateEvidence ?? { shipSanitation: [] };
+    const nextEvidence: QualityCertificateEvidence = { ...evidence };
+
+    if (field === "validDate" && (key === "pAndI" || key === "shipSanitation")) {
+      const currentExpired = isExpiredDate(currentRow.validDate);
+      const nextExpired = isExpiredDate(value);
+      const invalidCycleDate = currentExpired ? currentRow.validDate : (nextExpired ? value : undefined);
+
+      if (invalidCycleDate) {
+        const updatedFile = key === "pAndI" ? pAndIUpdatedFile() : sanitationEvidence[0];
+        const updateAlreadyUploaded = uploadedAfterInvalidDate(updatedFile, invalidCycleDate);
+        if (!updateAlreadyUploaded) {
+          if (key === "pAndI") {
+            nextEvidence.pAndIReplacementRequired = true;
+            nextEvidence.pAndIInvalidValidDate = invalidCycleDate;
+          } else {
+            nextEvidence.shipSanitationReplacementRequired = true;
+            nextEvidence.shipSanitationInvalidValidDate = invalidCycleDate;
+          }
+        }
+      }
+    }
+
     onChange({
       ...data,
       certificates: {
         ...data.certificates,
-        [key]: { ...data.certificates[key], [field]: value },
+        [key]: { ...currentRow, [field]: value },
       },
+      certificateEvidence: nextEvidence,
     });
   };
 
@@ -307,8 +436,190 @@ export function QualityAssessmentSection({ canEdit, data: dataProp, onChange }: 
     });
   };
 
+  const setInspectionNotApplicable = (key: InspectionKey, checked: boolean) => {
+    onChange({
+      ...data,
+      inspections: {
+        ...data.inspections,
+        [key]: checked
+          ? { date: "", place: "", by: "", notApplicable: true }
+          : { ...data.inspections[key], notApplicable: false },
+      },
+    });
+  };
+
+  function triggerEvidenceUpload(target: EvidenceTarget) {
+    setEvidenceTarget(target);
+    if (evidenceInputRef.current) {
+      evidenceInputRef.current.value = "";
+      evidenceInputRef.current.click();
+    }
+  }
+
+  async function uploadLocalEvidence(file: File): Promise<UploadedFile> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        uploadedAt: new Date().toISOString(),
+        dataUrl: reader.result as string,
+      });
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function replaceEvidence(target: EvidenceTarget, file: File) {
+    const docKey = target === "pAndI" ? "d_7_1" : "quality_ship_sanitation";
+    const uploaded = onUploadFile ? await onUploadFile(docKey, file) : await uploadLocalEvidence(file);
+
+    if (target === "pAndI") {
+      if (!requiredDocuments || !onRequiredDocumentsChange) {
+        throw new Error("Required Documents data is unavailable.");
+      }
+      const previous = requiredDocuments.d_7_1 ?? [];
+      if (onDeleteFile) {
+        for (const oldFile of previous) {
+          try { await onDeleteFile(oldFile); } catch (err) { console.warn("[P&I replacement cleanup failed]", err); }
+        }
+      }
+      const nextRequiredDocuments: RequiredDocumentsData = {
+        ...requiredDocuments,
+        d_7_1: [uploaded],
+        qualityUpdateFlags: {
+          ...(requiredDocuments.qualityUpdateFlags ?? {}),
+          pAndIFileId: uploaded.id,
+          pAndIInvalidValidDate: data.certificateEvidence?.pAndIInvalidValidDate
+            ?? data.certificates.pAndI?.validDate
+            ?? "",
+        },
+      };
+      const nextQualityData: QualityAssessmentData = {
+        ...data,
+        certificateEvidence: {
+          ...(data.certificateEvidence ?? { shipSanitation: [] }),
+          pAndIReplacementRequired: false,
+          pAndIInvalidValidDate: data.certificateEvidence?.pAndIInvalidValidDate
+            ?? data.certificates.pAndI?.validDate
+            ?? "",
+        },
+      };
+      if (onQualityAndRequiredDocumentsChange) {
+        onQualityAndRequiredDocumentsChange(nextQualityData, nextRequiredDocuments);
+      } else {
+        onRequiredDocumentsChange(nextRequiredDocuments);
+        onChange(nextQualityData);
+      }
+      return;
+    }
+
+    if (onDeleteFile) {
+      for (const oldFile of sanitationEvidence) {
+        try { await onDeleteFile(oldFile); } catch (err) { console.warn("[Sanitation replacement cleanup failed]", err); }
+      }
+    }
+    onChange({
+      ...data,
+      certificateEvidence: {
+        ...(data.certificateEvidence ?? { shipSanitation: [] }),
+        shipSanitation: [uploaded],
+        shipSanitationInvalidValidDate: data.certificateEvidence?.shipSanitationInvalidValidDate
+          ?? data.certificates.shipSanitation?.validDate
+          ?? "",
+        shipSanitationReplacementRequired: false,
+      },
+    });
+  }
+
+  async function handleEvidenceFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    const target = evidenceTarget;
+    if (!file || !target) return;
+    setEvidenceUploading(true);
+    try {
+      await replaceEvidence(target, file);
+    } catch (err) {
+      console.error("[Quality Assessment certificate upload failed]", err);
+      window.alert(err instanceof Error ? err.message : "Certificate upload failed.");
+    } finally {
+      setEvidenceUploading(false);
+      setEvidenceTarget(null);
+    }
+  }
+
+  async function downloadEvidence(file: UploadedFile) {
+    try {
+      const href = getDownloadUrl ? await getDownloadUrl(file) : file.dataUrl;
+      if (!href) throw new Error("This file has no downloadable source.");
+      const anchor = document.createElement("a");
+      anchor.href = href;
+      anchor.download = file.name;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+      anchor.click();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Unable to download this document.");
+    }
+  }
+
+  async function removeEvidence(target: EvidenceTarget, file: UploadedFile) {
+    try {
+      if (onDeleteFile) await onDeleteFile(file);
+      if (target === "pAndI") {
+        if (requiredDocuments && onRequiredDocumentsChange) {
+          const nextRequiredDocuments: RequiredDocumentsData = {
+            ...requiredDocuments,
+            d_7_1: (requiredDocuments.d_7_1 ?? []).filter(item => item.id !== file.id),
+            qualityUpdateFlags: {
+              ...(requiredDocuments.qualityUpdateFlags ?? {}),
+              pAndIFileId: requiredDocuments.qualityUpdateFlags?.pAndIFileId === file.id ? undefined : requiredDocuments.qualityUpdateFlags?.pAndIFileId,
+              pAndIInvalidValidDate: requiredDocuments.qualityUpdateFlags?.pAndIFileId === file.id ? undefined : requiredDocuments.qualityUpdateFlags?.pAndIInvalidValidDate,
+            },
+          };
+          const nextQualityData: QualityAssessmentData = {
+            ...data,
+            certificateEvidence: {
+              ...(data.certificateEvidence ?? { shipSanitation: [] }),
+              pAndIReplacementRequired: true,
+            },
+          };
+          if (onQualityAndRequiredDocumentsChange) {
+            onQualityAndRequiredDocumentsChange(nextQualityData, nextRequiredDocuments);
+          } else {
+            onRequiredDocumentsChange(nextRequiredDocuments);
+            onChange(nextQualityData);
+          }
+        }
+      } else {
+        onChange({
+          ...data,
+          certificateEvidence: {
+            ...(data.certificateEvidence ?? { shipSanitation: [] }),
+            shipSanitation: sanitationEvidence.filter(item => item.id !== file.id),
+            shipSanitationInvalidValidDate: data.certificateEvidence?.shipSanitationInvalidValidDate
+              ?? data.certificates.shipSanitation?.validDate
+              ?? "",
+            shipSanitationReplacementRequired: true,
+          },
+        });
+      }
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Unable to remove this document.");
+    }
+  }
+
   return (
     <div className="space-y-5 mb-6">
+      <input
+        ref={evidenceInputRef}
+        type="file"
+        className="hidden"
+        onChange={handleEvidenceFile}
+        accept=".pdf,.png,.jpg,.jpeg,.doc,.docx"
+      />
       <div className="border border-border rounded bg-card overflow-hidden">
         <div className="border-b border-border bg-secondary/30 px-5 py-3">
           <p className="font-mono text-xs font-bold text-foreground uppercase tracking-widest">
@@ -393,6 +704,59 @@ export function QualityAssessmentSection({ canEdit, data: dataProp, onChange }: 
                                   )}
                                 </div>
                               )}
+                              {(definition.key === "pAndI" || definition.key === "shipSanitation") && (() => {
+                                const target: EvidenceTarget = definition.key === "pAndI" ? "pAndI" : "shipSanitation";
+                                const replacementFlag = target === "pAndI"
+                                  ? Boolean(data.certificateEvidence?.pAndIReplacementRequired)
+                                  : Boolean(data.certificateEvidence?.shipSanitationReplacementRequired);
+                                const files = target === "pAndI" ? (requiredDocuments?.d_7_1 ?? []) : sanitationEvidence;
+                                const candidateFile = files[0];
+                                const recordedFile = target === "pAndI"
+                                  ? (candidateFile && requiredDocuments?.qualityUpdateFlags?.pAndIFileId === candidateFile.id ? candidateFile : undefined)
+                                  : candidateFile;
+                                const invalidCycleDate = target === "pAndI"
+                                  ? (data.certificateEvidence?.pAndIInvalidValidDate ?? (isExpiredDate(row.validDate) ? row.validDate : undefined))
+                                  : (data.certificateEvidence?.shipSanitationInvalidValidDate ?? (isExpiredDate(row.validDate) ? row.validDate : undefined));
+                                const fileSatisfiesCycle = Boolean(recordedFile && uploadedAfterInvalidDate(recordedFile, invalidCycleDate));
+                                const replacementRequired = isExpiredDate(row.validDate)
+                                  || replacementFlag
+                                  || Boolean(invalidCycleDate && !fileSatisfiesCycle);
+                                if (!replacementRequired) return null;
+
+                                // Changing the date never clears the upload requirement. The file
+                                // must belong to the invalid cycle that originally triggered it.
+                                const file = !replacementFlag && fileSatisfiesCycle ? recordedFile : undefined;
+                                return (
+                                  <div className="rounded border border-red-300 bg-red-50 px-2.5 py-2 space-y-1.5">
+                                    <p className="font-mono text-[10px] font-bold text-red-700">UPDATED CERTIFICATE REQUIRED</p>
+                                    {file ? (
+                                      <div className="flex items-center gap-2 min-w-0">
+                                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                        <span className="font-mono text-[10px] text-emerald-700 truncate flex-1">Uploaded: {file.name}</span>
+                                        <button type="button" onClick={() => downloadEvidence(file)} title="Download" className="text-emerald-700 hover:text-emerald-900"><Download className="w-3.5 h-3.5" /></button>
+                                        {canEdit && (
+                                          <button type="button" onClick={() => removeEvidence(target, file)} title="Remove" className="text-red-500 hover:text-red-700"><X className="w-3.5 h-3.5" /></button>
+                                        )}
+                                      </div>
+                                    ) : canEdit ? (
+                                      <button
+                                        type="button"
+                                        disabled={evidenceUploading}
+                                        onClick={() => triggerEvidenceUpload(target)}
+                                        className="inline-flex items-center gap-1.5 rounded border border-red-400 bg-white px-2.5 py-1.5 font-mono text-[10px] font-bold text-red-700 hover:bg-red-100 disabled:cursor-wait disabled:opacity-60"
+                                      >
+                                        {evidenceUploading && evidenceTarget === target ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                                        {evidenceUploading && evidenceTarget === target ? "Uploading..." : "Upload updated certificate"}
+                                      </button>
+                                    ) : (
+                                      <span className="font-mono text-[10px] text-red-700">No updated certificate uploaded</span>
+                                    )}
+                                    {target === "pAndI" && (
+                                      <p className="font-mono text-[9px] text-red-600">Uploading here replaces Required Document 7.1 P&amp;I Certificate of Entry and marks it as the updated certificate.</p>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                             </div>
                           )}
                         </td>
@@ -410,10 +774,11 @@ export function QualityAssessmentSection({ canEdit, data: dataProp, onChange }: 
               <table className="w-full min-w-[900px] text-sm">
                 <thead>
                   <tr className="bg-yellow-300 text-gray-950 border-b border-border">
-                    <th className="px-4 py-2.5 text-left font-bold w-[34%]">Inspection</th>
-                    <th className="px-4 py-2.5 text-left font-bold w-[18%]">Date</th>
-                    <th className="px-4 py-2.5 text-left font-bold w-[24%]">Place</th>
-                    <th className="px-4 py-2.5 text-left font-bold w-[24%]">By</th>
+                    <th className="px-4 py-2.5 text-left font-bold w-[30%]">Inspection</th>
+                    <th className="px-4 py-2.5 text-left font-bold w-[16%]">Date</th>
+                    <th className="px-4 py-2.5 text-left font-bold w-[22%]">Place</th>
+                    <th className="px-4 py-2.5 text-left font-bold w-[22%]">By</th>
+                    <th className="px-4 py-2.5 text-center font-bold w-[10%]">N/A</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -423,8 +788,10 @@ export function QualityAssessmentSection({ canEdit, data: dataProp, onChange }: 
                       <tr key={definition.key} className={index < INSPECTION_ROWS.length - 1 ? "border-b border-border" : ""}>
                         <td className="px-4 py-2.5 bg-secondary/30 text-foreground">{definition.label}</td>
                         {(["date", "place", "by"] as const).map(field => (
-                          <td key={field} className="px-3 py-1.5">
-                            {field === "date" ? (
+                          <td key={field} className={`px-3 py-1.5 ${row.notApplicable ? "bg-slate-50" : ""}`}>
+                            {row.notApplicable ? (
+                              <span className="font-mono text-xs font-bold text-slate-500">N/A</span>
+                            ) : field === "date" ? (
                               <FixedDateInput
                                 value={row.date}
                                 canEdit={canEdit}
@@ -443,6 +810,18 @@ export function QualityAssessmentSection({ canEdit, data: dataProp, onChange }: 
                             )}
                           </td>
                         ))}
+                        <td className="px-3 py-1.5 text-center">
+                          <label className={`inline-flex items-center gap-1.5 font-mono text-[10px] ${canEdit ? "cursor-pointer" : "cursor-default"} ${row.notApplicable ? "text-slate-700 font-bold" : "text-muted-foreground"}`}>
+                            <input
+                              type="checkbox"
+                              checked={Boolean(row.notApplicable)}
+                              disabled={!canEdit}
+                              onChange={event => setInspectionNotApplicable(definition.key, event.target.checked)}
+                              className="h-3.5 w-3.5 accent-slate-500"
+                            />
+                            N/A
+                          </label>
+                        </td>
                       </tr>
                     );
                   })}

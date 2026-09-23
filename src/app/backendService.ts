@@ -98,6 +98,7 @@ const SECTION_KEYS = [
   ["attachments", "attachmentData"],
   ["quality_assessment", "qualityAssessmentData"],
   ["workflow_meta", "workflowMetaData"],
+  ["terminal_feedback", "feedbackData"],
 ] as const;
 
 function profileFromRow(row: any): CloudProfile {
@@ -524,16 +525,23 @@ export async function fetchStudies(defaults: Record<string, () => any>): Promise
   });
 }
 
-export async function saveStudy(study: AnyStudy, updatedBy?: string) {
+export async function saveStudy(
+  study: AnyStudy,
+  updatedBy?: string,
+  options?: { sectionKeys?: string[]; updateCore?: boolean },
+) {
   const client = requireSupabase();
   const coreRow = studyCoreToRow(study);
-  const sectionRows = SECTION_KEYS.map(([sectionKey, property]) => ({
+  const allSectionRows = SECTION_KEYS.map(([sectionKey, property]) => ({
     study_id: study.id,
     section_key: sectionKey,
     data: study[property] ?? {},
     updated_by: updatedBy ?? null,
     updated_at: new Date().toISOString(),
   }));
+  const sectionRows = options?.sectionKeys
+    ? allSectionRows.filter(row => options.sectionKeys!.includes(row.section_key))
+    : allSectionRows;
 
   const { data: existing, error: lookupError } = await client
     .from("sscs_studies")
@@ -547,6 +555,21 @@ export async function saveStudy(study: AnyStudy, updatedBy?: string) {
     if (insertError) throw insertError;
     const { error: sectionError } = await client.from("study_sections").insert(sectionRows);
     if (sectionError) throw sectionError;
+    return;
+  }
+
+  // Submitted-feedback correction is a partial save: Ship Officer may only
+  // change the parts selected by the Terminal Officer while the parent study
+  // remains Submitted. RLS migration 009 enforces the same scope server-side.
+  if (options) {
+    if (options.updateCore) {
+      const { error: updateError } = await client.from("sscs_studies").update(coreRow).eq("id", study.id);
+      if (updateError) throw updateError;
+    }
+    if (sectionRows.length > 0) {
+      const { error: sectionError } = await client.from("study_sections").upsert(sectionRows, { onConflict: "study_id,section_key" });
+      if (sectionError) throw sectionError;
+    }
     return;
   }
 
@@ -565,6 +588,20 @@ export async function saveStudy(study: AnyStudy, updatedBy?: string) {
   // Requesting edit from an approved study only changes workflow metadata. Once the
   // row becomes edit_requested the ship must not be allowed to rewrite section data.
   if (study.status === "edit_requested" && existing.status === "approved") {
+    const { error: updateError } = await client.from("sscs_studies").update(coreRow).eq("id", study.id);
+    if (updateError) throw updateError;
+    return;
+  }
+
+  // Approval is the final content lock. Persist all review-time section changes
+  // while the parent row is still Submitted/Editing, then move the parent to
+  // Approved. Migration 010 makes Approved study content read-only for every role.
+  // Returning an edit request to Approved does not rewrite section data.
+  if (study.status === "approved" && existing.status !== "approved") {
+    if (existing.status === "submitted" || existing.status === "editing") {
+      const { error: sectionError } = await client.from("study_sections").upsert(sectionRows, { onConflict: "study_id,section_key" });
+      if (sectionError) throw sectionError;
+    }
     const { error: updateError } = await client.from("sscs_studies").update(coreRow).eq("id", study.id);
     if (updateError) throw updateError;
     return;
