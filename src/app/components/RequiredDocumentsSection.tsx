@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Upload, FileText, X, Download, CheckCircle2 } from "lucide-react";
+import { Upload, FileText, X, Download, CheckCircle2, Loader2 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -353,11 +353,36 @@ export function RequiredDocumentsSection({
                           {canEdit && !isLocked && (
                             <button
                               onClick={() => triggerUpload(key)}
-                              disabled={loading && activeKey === key}
-                              className="flex items-center gap-1.5 text-[11px] font-mono text-muted-foreground hover:text-primary border border-dashed border-border hover:border-primary/50 rounded px-3 py-1.5 transition-all">
-                              <Upload className="w-3 h-3" />
-                              {hasFiles ? "Add more files" : "Upload file"}
+                              disabled={loading}
+                              aria-busy={loading && activeKey === key}
+                              className={`flex items-center gap-1.5 text-[11px] font-mono border border-dashed rounded px-3 py-1.5 transition-all ${
+                                loading && activeKey === key
+                                  ? "text-primary border-primary/50 bg-primary/5 cursor-wait"
+                                  : loading
+                                    ? "text-muted-foreground/40 border-border/50 cursor-not-allowed"
+                                    : "text-muted-foreground hover:text-primary border-border hover:border-primary/50"
+                              }`}>
+                              {loading && activeKey === key ? (
+                                <>
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  <span>Uploading...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Upload className="w-3 h-3" />
+                                  <span>{hasFiles ? "Add more files" : "Upload file"}</span>
+                                </>
+                              )}
                             </button>
+                          )}
+
+                          {loading && activeKey === key && (
+                            <div className="mt-2 flex items-center gap-2 text-primary">
+                              <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                              <span className="font-mono text-[10px]">
+                                Upload in progress — please wait and keep this page open
+                              </span>
+                            </div>
                           )}
 
                           {/* Read-only empty state */}
