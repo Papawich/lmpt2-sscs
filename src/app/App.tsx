@@ -2956,14 +2956,12 @@ export default function App() {
                 </div>
 
                 <div className="min-h-0 flex-1 overflow-y-auto">
-  {showSubmittedPhotos && vesselPhotos.length > 0 && (
-    <div className="max-h-32 overflow-hidden [&_img]:max-h-32 [&_img]:w-full [&_img]:object-cover">
-      <VesselPhotoSummary
-        files={vesselPhotos}
-        getFileUrl={supabaseConfigured ? handleDocumentDownload : undefined}
-      />
-    </div>
-  )}
+{showSubmittedPhotos && vesselPhotos.length > 0 && (
+  <VesselPhotoSummary
+    files={vesselPhotos}
+    getFileUrl={supabaseConfigured ? handleDocumentDownload : undefined}
+  />
+)}
 
   {/* Rows */}
   <div className="divide-y divide-border/50">
