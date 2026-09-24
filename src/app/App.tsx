@@ -2238,18 +2238,21 @@ export default function App() {
     }
   }
 
-  function approveStudy() {
-    if (!activeStudy || !currentUser) return;
-    const approvedStudy = clearTerminalOfficerAssignment({
-      ...activeStudy,
-      status: "approved",
-      reviewedById: currentUser.id,
-      reviewedByName: currentUser.name,
-      approvedAt: new Date().toISOString(),
-      feedbackData: activeStudy.feedbackData && activeStudy.feedbackData.status !== "none"
-        ? { ...activeStudy.feedbackData, status: "closed" }
-        : (activeStudy.feedbackData ?? defaultTerminalFeedbackData()),
-    });
+function approveStudy() {
+  if (!activeStudy || !currentUser) return;
+  const approvedStudy = clearTerminalOfficerAssignment({
+    ...activeStudy,
+    status: "approved",
+    editRequestedById: undefined,
+    editRequestedByName: undefined,
+    editRequestedAt: undefined,
+    reviewedById: currentUser.id,
+    reviewedByName: currentUser.name,
+    approvedAt: new Date().toISOString(),
+    feedbackData: activeStudy.feedbackData && activeStudy.feedbackData.status !== "none"
+      ? { ...activeStudy.feedbackData, status: "closed" }
+      : (activeStudy.feedbackData ?? defaultTerminalFeedbackData()),
+  });
     syncStudy(approvedStudy, true);
     showToast("Study approved and locked.", "success");
     const shipUser = users.find(u => u.id === (activeStudy.submittedById ?? activeStudy.initiatedById));
