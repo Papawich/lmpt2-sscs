@@ -3692,7 +3692,7 @@ export default function App() {
                       <Pencil className="w-3.5 h-3.5" />{study.status === "draft" ? "Continue Filling" : "Continue Editing"}
                     </button>
                   )}
-                  {canShipManageVessel && study.status === "approved" && !study.editRequestedById && !canKickoff && (
+                  {canShipManageVessel && study.status === "approved" && !study.editRequestedById && (
                     <button onClick={() => { syncStudy({ ...study, status: "edit_requested", editRequestedById: currentUser.id, editRequestedByName: currentUser.name, editRequestedAt: new Date().toISOString() }); notifyTerminalOfficersOfEditRequest(study, currentUser); showToast("Edit request sent to Terminal Officer.", "info"); }}
                       className="flex items-center gap-2 px-4 py-2 rounded border border-orange-500/30 bg-orange-500/8 text-orange-400 hover:bg-orange-500/15 text-xs font-mono font-semibold uppercase transition-colors">
                       <Edit3 className="w-3.5 h-3.5" />Request to Edit
