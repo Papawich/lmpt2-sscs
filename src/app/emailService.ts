@@ -74,6 +74,15 @@ function resolveEmailVisualTheme(subject: string): EmailVisualTheme {
       actionLabel: "Open Study",
     };
   }
+  if (value.includes("corrections completed")) {
+    return {
+      headerColor: "#0F766E",
+      headerTint: "#F0FDFA",
+      statusLabel: "CORRECTED",
+      categoryLabel: "READY FOR REVIEW",
+      actionLabel: "Review Study",
+    };
+  }
   if (value.includes("feedback")) {
     return {
       headerColor: "#7C3AED",
@@ -315,6 +324,22 @@ export async function notifyShipOfficerStudyFeedback(opts: {
     opts.shipEmail,
     `SSCS Feedback — ${opts.vesselName}`,
     `The Terminal Officer has sent feedback on your submitted SSCS study.\n\nVessel       : ${opts.vesselName}\nSent by      : ${opts.requestedByName}\n\nParts requiring correction:\n${partLines}\n\nFeedback:\n${opts.message}\n\nPlease log in to the LMPT2 SSCS system and correct the highlighted parts. The study remains Submitted; a formal Request Revision is not required.`,
+  );
+}
+
+export async function notifyTerminalOfficerFeedbackCorrected(opts: {
+  vesselName: string;
+  shipOfficerName: string;
+  terminalEmail: string;
+  parts: { section: string; assessment: "invalid" | "unacceptable" }[];
+}) {
+  const partLines = opts.parts
+    .map(part => `- ${part.section}: ${part.assessment.toUpperCase()}`)
+    .join("\n");
+  await send(
+    opts.terminalEmail,
+    `SSCS Feedback Corrections Completed — ${opts.vesselName}`,
+    `The Ship Officer has reported that the requested feedback corrections are complete.\n\nVessel           : ${opts.vesselName}\nCorrected by     : ${opts.shipOfficerName}\n\nParts corrected:\n${partLines}\n\nPlease log in to the LMPT2 SSCS system and review the corrected information. The study remains Submitted until you approve it or send additional feedback.`,
   );
 }
 

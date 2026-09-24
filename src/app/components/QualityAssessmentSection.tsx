@@ -219,9 +219,7 @@ export function isQualityAssessmentComplete(
   );
   const pAndIReplacementComplete = !evidence.pAndIReplacementRequired
     && (!evidence.pAndIInvalidValidDate || pAndIRecordedUpdate);
-  const sanitationReplacementComplete = !evidence.shipSanitationReplacementRequired
-    && (!evidence.shipSanitationInvalidValidDate || evidence.shipSanitation.length > 0);
-  return certificateComplete && inspectionComplete && pAndIReplacementComplete && sanitationReplacementComplete;
+  return certificateComplete && inspectionComplete && pAndIReplacementComplete;
 }
 
 // ─── Definitions ──────────────────────────────────────────────────────────────
@@ -319,7 +317,7 @@ interface Props {
   getDownloadUrl?: (file: UploadedFile) => Promise<string>;
 }
 
-type EvidenceTarget = "pAndI" | "shipSanitation";
+type EvidenceTarget = "pAndI";
 
 export function QualityAssessmentSection({
   canEdit, data: dataProp, onChange, requiredDocuments, onRequiredDocumentsChange,
@@ -329,7 +327,6 @@ export function QualityAssessmentSection({
   const evidenceInputRef = useRef<HTMLInputElement>(null);
   const [evidenceTarget, setEvidenceTarget] = useState<EvidenceTarget | null>(null);
   const [evidenceUploading, setEvidenceUploading] = useState(false);
-  const sanitationEvidence = data.certificateEvidence?.shipSanitation ?? [];
 
   const uploadedAfterInvalidDate = (file: UploadedFile | undefined, invalidValidDate: string | undefined) => {
     if (!file?.uploadedAt || !invalidValidDate) return false;
@@ -368,27 +365,13 @@ export function QualityAssessmentSection({
       }
     }
 
-    const sanitationInvalidDate = data.certificates.shipSanitation?.validDate ?? "";
-    if (isExpiredDate(sanitationInvalidDate)) {
-      const updatedFile = sanitationEvidence[0];
-      if (!uploadedAfterInvalidDate(updatedFile, sanitationInvalidDate)) {
-        if (!evidence.shipSanitationReplacementRequired || evidence.shipSanitationInvalidValidDate !== sanitationInvalidDate) {
-          nextEvidence.shipSanitationReplacementRequired = true;
-          nextEvidence.shipSanitationInvalidValidDate = sanitationInvalidDate;
-          changed = true;
-        }
-      }
-    }
-
     if (changed) onChange({ ...data, certificateEvidence: nextEvidence });
   // Only certificate dates / replacement evidence open a new replacement cycle.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     canEdit,
     data.certificates.pAndI?.validDate,
-    data.certificates.shipSanitation?.validDate,
     requiredDocuments?.qualityUpdateFlags?.pAndIFileId,
-    sanitationEvidence[0]?.id,
   ]);
 
   const setCertificate = (key: CertificateKey, field: keyof CertificateAssessmentRow, value: string) => {
@@ -396,22 +379,17 @@ export function QualityAssessmentSection({
     const evidence = data.certificateEvidence ?? { shipSanitation: [] };
     const nextEvidence: QualityCertificateEvidence = { ...evidence };
 
-    if (field === "validDate" && (key === "pAndI" || key === "shipSanitation")) {
+    if (field === "validDate" && key === "pAndI") {
       const currentExpired = isExpiredDate(currentRow.validDate);
       const nextExpired = isExpiredDate(value);
       const invalidCycleDate = currentExpired ? currentRow.validDate : (nextExpired ? value : undefined);
 
       if (invalidCycleDate) {
-        const updatedFile = key === "pAndI" ? pAndIUpdatedFile() : sanitationEvidence[0];
+        const updatedFile = pAndIUpdatedFile();
         const updateAlreadyUploaded = uploadedAfterInvalidDate(updatedFile, invalidCycleDate);
         if (!updateAlreadyUploaded) {
-          if (key === "pAndI") {
-            nextEvidence.pAndIReplacementRequired = true;
-            nextEvidence.pAndIInvalidValidDate = invalidCycleDate;
-          } else {
-            nextEvidence.shipSanitationReplacementRequired = true;
-            nextEvidence.shipSanitationInvalidValidDate = invalidCycleDate;
-          }
+          nextEvidence.pAndIReplacementRequired = true;
+          nextEvidence.pAndIInvalidValidDate = invalidCycleDate;
         }
       }
     }
@@ -473,65 +451,45 @@ export function QualityAssessmentSection({
   }
 
   async function replaceEvidence(target: EvidenceTarget, file: File) {
-    const docKey = target === "pAndI" ? "d_7_1" : "quality_ship_sanitation";
+    const docKey = "d_7_1";
     const uploaded = onUploadFile ? await onUploadFile(docKey, file) : await uploadLocalEvidence(file);
 
-    if (target === "pAndI") {
-      if (!requiredDocuments || !onRequiredDocumentsChange) {
-        throw new Error("Required Documents data is unavailable.");
-      }
-      const previous = requiredDocuments.d_7_1 ?? [];
-      if (onDeleteFile) {
-        for (const oldFile of previous) {
-          try { await onDeleteFile(oldFile); } catch (err) { console.warn("[P&I replacement cleanup failed]", err); }
-        }
-      }
-      const nextRequiredDocuments: RequiredDocumentsData = {
-        ...requiredDocuments,
-        d_7_1: [uploaded],
-        qualityUpdateFlags: {
-          ...(requiredDocuments.qualityUpdateFlags ?? {}),
-          pAndIFileId: uploaded.id,
-          pAndIInvalidValidDate: data.certificateEvidence?.pAndIInvalidValidDate
-            ?? data.certificates.pAndI?.validDate
-            ?? "",
-        },
-      };
-      const nextQualityData: QualityAssessmentData = {
-        ...data,
-        certificateEvidence: {
-          ...(data.certificateEvidence ?? { shipSanitation: [] }),
-          pAndIReplacementRequired: false,
-          pAndIInvalidValidDate: data.certificateEvidence?.pAndIInvalidValidDate
-            ?? data.certificates.pAndI?.validDate
-            ?? "",
-        },
-      };
-      if (onQualityAndRequiredDocumentsChange) {
-        onQualityAndRequiredDocumentsChange(nextQualityData, nextRequiredDocuments);
-      } else {
-        onRequiredDocumentsChange(nextRequiredDocuments);
-        onChange(nextQualityData);
-      }
-      return;
+    if (!requiredDocuments || !onRequiredDocumentsChange) {
+      throw new Error("Required Documents data is unavailable.");
     }
-
+    const previous = requiredDocuments.d_7_1 ?? [];
     if (onDeleteFile) {
-      for (const oldFile of sanitationEvidence) {
-        try { await onDeleteFile(oldFile); } catch (err) { console.warn("[Sanitation replacement cleanup failed]", err); }
+      for (const oldFile of previous) {
+        try { await onDeleteFile(oldFile); } catch (err) { console.warn("[P&I replacement cleanup failed]", err); }
       }
     }
-    onChange({
+    const nextRequiredDocuments: RequiredDocumentsData = {
+      ...requiredDocuments,
+      d_7_1: [uploaded],
+      qualityUpdateFlags: {
+        ...(requiredDocuments.qualityUpdateFlags ?? {}),
+        pAndIFileId: uploaded.id,
+        pAndIInvalidValidDate: data.certificateEvidence?.pAndIInvalidValidDate
+          ?? data.certificates.pAndI?.validDate
+          ?? "",
+      },
+    };
+    const nextQualityData: QualityAssessmentData = {
       ...data,
       certificateEvidence: {
         ...(data.certificateEvidence ?? { shipSanitation: [] }),
-        shipSanitation: [uploaded],
-        shipSanitationInvalidValidDate: data.certificateEvidence?.shipSanitationInvalidValidDate
-          ?? data.certificates.shipSanitation?.validDate
+        pAndIReplacementRequired: false,
+        pAndIInvalidValidDate: data.certificateEvidence?.pAndIInvalidValidDate
+          ?? data.certificates.pAndI?.validDate
           ?? "",
-        shipSanitationReplacementRequired: false,
       },
-    });
+    };
+    if (onQualityAndRequiredDocumentsChange) {
+      onQualityAndRequiredDocumentsChange(nextQualityData, nextRequiredDocuments);
+    } else {
+      onRequiredDocumentsChange(nextRequiredDocuments);
+      onChange(nextQualityData);
+    }
   }
 
   async function handleEvidenceFile(event: React.ChangeEvent<HTMLInputElement>) {
@@ -565,46 +523,32 @@ export function QualityAssessmentSection({
     }
   }
 
-  async function removeEvidence(target: EvidenceTarget, file: UploadedFile) {
+  async function removeEvidence(_target: EvidenceTarget, file: UploadedFile) {
     try {
       if (onDeleteFile) await onDeleteFile(file);
-      if (target === "pAndI") {
-        if (requiredDocuments && onRequiredDocumentsChange) {
-          const nextRequiredDocuments: RequiredDocumentsData = {
-            ...requiredDocuments,
-            d_7_1: (requiredDocuments.d_7_1 ?? []).filter(item => item.id !== file.id),
-            qualityUpdateFlags: {
-              ...(requiredDocuments.qualityUpdateFlags ?? {}),
-              pAndIFileId: requiredDocuments.qualityUpdateFlags?.pAndIFileId === file.id ? undefined : requiredDocuments.qualityUpdateFlags?.pAndIFileId,
-              pAndIInvalidValidDate: requiredDocuments.qualityUpdateFlags?.pAndIFileId === file.id ? undefined : requiredDocuments.qualityUpdateFlags?.pAndIInvalidValidDate,
-            },
-          };
-          const nextQualityData: QualityAssessmentData = {
-            ...data,
-            certificateEvidence: {
-              ...(data.certificateEvidence ?? { shipSanitation: [] }),
-              pAndIReplacementRequired: true,
-            },
-          };
-          if (onQualityAndRequiredDocumentsChange) {
-            onQualityAndRequiredDocumentsChange(nextQualityData, nextRequiredDocuments);
-          } else {
-            onRequiredDocumentsChange(nextRequiredDocuments);
-            onChange(nextQualityData);
-          }
-        }
-      } else {
-        onChange({
+      if (requiredDocuments && onRequiredDocumentsChange) {
+        const nextRequiredDocuments: RequiredDocumentsData = {
+          ...requiredDocuments,
+          d_7_1: (requiredDocuments.d_7_1 ?? []).filter(item => item.id !== file.id),
+          qualityUpdateFlags: {
+            ...(requiredDocuments.qualityUpdateFlags ?? {}),
+            pAndIFileId: requiredDocuments.qualityUpdateFlags?.pAndIFileId === file.id ? undefined : requiredDocuments.qualityUpdateFlags?.pAndIFileId,
+            pAndIInvalidValidDate: requiredDocuments.qualityUpdateFlags?.pAndIFileId === file.id ? undefined : requiredDocuments.qualityUpdateFlags?.pAndIInvalidValidDate,
+          },
+        };
+        const nextQualityData: QualityAssessmentData = {
           ...data,
           certificateEvidence: {
             ...(data.certificateEvidence ?? { shipSanitation: [] }),
-            shipSanitation: sanitationEvidence.filter(item => item.id !== file.id),
-            shipSanitationInvalidValidDate: data.certificateEvidence?.shipSanitationInvalidValidDate
-              ?? data.certificates.shipSanitation?.validDate
-              ?? "",
-            shipSanitationReplacementRequired: true,
+            pAndIReplacementRequired: true,
           },
-        });
+        };
+        if (onQualityAndRequiredDocumentsChange) {
+          onQualityAndRequiredDocumentsChange(nextQualityData, nextRequiredDocuments);
+        } else {
+          onRequiredDocumentsChange(nextRequiredDocuments);
+          onChange(nextQualityData);
+        }
       }
     } catch (err) {
       window.alert(err instanceof Error ? err.message : "Unable to remove this document.");
@@ -702,21 +646,18 @@ export function QualityAssessmentSection({
                                   {isExpiredDate(row.validDate) && (
                                     <span className="font-mono text-[10px] text-red-600">Expired</span>
                                   )}
+                                  {definition.key === "shipSanitation" && isExpiredDate(row.validDate) && canEdit && (
+                                    <span className="font-mono text-[10px] text-amber-700">Update the Valid Date after certificate renewal. No attachment is required.</span>
+                                  )}
                                 </div>
                               )}
-                              {(definition.key === "pAndI" || definition.key === "shipSanitation") && (() => {
-                                const target: EvidenceTarget = definition.key === "pAndI" ? "pAndI" : "shipSanitation";
-                                const replacementFlag = target === "pAndI"
-                                  ? Boolean(data.certificateEvidence?.pAndIReplacementRequired)
-                                  : Boolean(data.certificateEvidence?.shipSanitationReplacementRequired);
-                                const files = target === "pAndI" ? (requiredDocuments?.d_7_1 ?? []) : sanitationEvidence;
-                                const candidateFile = files[0];
-                                const recordedFile = target === "pAndI"
-                                  ? (candidateFile && requiredDocuments?.qualityUpdateFlags?.pAndIFileId === candidateFile.id ? candidateFile : undefined)
-                                  : candidateFile;
-                                const invalidCycleDate = target === "pAndI"
-                                  ? (data.certificateEvidence?.pAndIInvalidValidDate ?? (isExpiredDate(row.validDate) ? row.validDate : undefined))
-                                  : (data.certificateEvidence?.shipSanitationInvalidValidDate ?? (isExpiredDate(row.validDate) ? row.validDate : undefined));
+                              {definition.key === "pAndI" && (() => {
+                                const target: EvidenceTarget = "pAndI";
+                                const replacementFlag = Boolean(data.certificateEvidence?.pAndIReplacementRequired);
+                                const candidateFile = (requiredDocuments?.d_7_1 ?? [])[0];
+                                const recordedFile = candidateFile && requiredDocuments?.qualityUpdateFlags?.pAndIFileId === candidateFile.id ? candidateFile : undefined;
+                                const invalidCycleDate = data.certificateEvidence?.pAndIInvalidValidDate
+                                  ?? (isExpiredDate(row.validDate) ? row.validDate : undefined);
                                 const fileSatisfiesCycle = Boolean(recordedFile && uploadedAfterInvalidDate(recordedFile, invalidCycleDate));
                                 const replacementRequired = isExpiredDate(row.validDate)
                                   || replacementFlag
@@ -751,9 +692,7 @@ export function QualityAssessmentSection({
                                     ) : (
                                       <span className="font-mono text-[10px] text-red-700">No updated certificate uploaded</span>
                                     )}
-                                    {target === "pAndI" && (
-                                      <p className="font-mono text-[9px] text-red-600">Uploading here replaces Required Document 7.1 P&amp;I Certificate of Entry and marks it as the updated certificate.</p>
-                                    )}
+                                    <p className="font-mono text-[9px] text-red-600">Uploading here replaces Required Document 7.1 P&amp;I Certificate of Entry and marks it as the updated certificate.</p>
                                   </div>
                                 );
                               })()}

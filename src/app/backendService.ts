@@ -525,6 +525,15 @@ export async function fetchStudies(defaults: Record<string, () => any>): Promise
   });
 }
 
+export async function markStudyFeedbackCorrected(studyId: string): Promise<Record<string, any>> {
+  const client = requireSupabase();
+  const { data, error } = await client.rpc("ship_mark_feedback_corrected", {
+    target_study_id: studyId,
+  });
+  if (error) throw error;
+  return (data ?? {}) as Record<string, any>;
+}
+
 export async function saveStudy(
   study: AnyStudy,
   updatedBy?: string,

@@ -18,6 +18,7 @@ import {
   notifyShipOfficerStudyApproved,
   notifyShipOfficerEditApproved,
   notifyShipOfficerStudyFeedback,
+  notifyTerminalOfficerFeedbackCorrected,
   notifyTerminalOfficerEditRequested,
   notifyShipOfficerEditRejected,
   notifyTerminalOfficerVesselAccessRequest,
@@ -48,6 +49,7 @@ import {
   updateSisterShipVerification,
   fetchStudies,
   saveStudy as saveCloudStudy,
+  markStudyFeedbackCorrected,
   uploadStudyDocument,
   getStudyDocumentUrl,
   deleteStudyDocument,
@@ -317,12 +319,15 @@ interface TerminalFeedbackItem {
 }
 
 interface TerminalFeedbackData {
-  status: "none" | "open" | "closed";
+  status: "none" | "open" | "corrected" | "closed";
   items: TerminalFeedbackItem[];
   message: string;
   sentById?: string;
   sentByName?: string;
   sentAt?: string;
+  correctedById?: string;
+  correctedByName?: string;
+  correctedAt?: string;
 }
 
 function defaultTerminalFeedbackData(): TerminalFeedbackData {
@@ -971,6 +976,7 @@ export default function App() {
   const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false);
   const [feedbackMessage, setFeedbackMessage] = useState("");
   const [feedbackParts, setFeedbackParts] = useState<Record<string, FeedbackAssessment | undefined>>({});
+  const [feedbackCompletionSending, setFeedbackCompletionSending] = useState(false);
 
   // ── Login state ─────────────────────────────────────────────────────────────
   const [loginEmail, setLoginEmail]     = useState("");
@@ -2130,6 +2136,67 @@ export default function App() {
     showToast(`Feedback sent to Ship Officer ${shipUser.name}. Selected parts are now editable.`, "success");
   }
 
+  async function confirmFeedbackCorrectionsCompleted() {
+    if (!activeStudy || !currentUser || currentUser.role !== "ship_officer") return;
+    if (activeStudy.status !== "submitted" || activeStudy.feedbackData?.status !== "open") return;
+
+    const assignedTerminal = assignedTerminalForStudy(activeStudy);
+    if (!assignedTerminal?.email?.trim()) {
+      showToast("No Terminal Officer is currently In Charge. Please contact the Terminal team.", "error");
+      return;
+    }
+
+    setFeedbackCompletionSending(true);
+    try {
+      // Flush the selected correction sections before closing the feedback window.
+      const pendingSave = studySaveTimers.current[activeStudy.id];
+      if (pendingSave) {
+        clearTimeout(pendingSave);
+        delete studySaveTimers.current[activeStudy.id];
+      }
+      if (supabaseConfigured) {
+        const feedbackKeys = Array.from(new Set(
+          activeStudy.feedbackData.items
+            .flatMap(item => item.sectionKeys ?? [])
+            .filter(key => key !== "__core__")
+        ));
+        const updateCore = activeStudy.feedbackData.items
+          .some(item => (item.sectionKeys ?? []).includes("__core__"));
+        await saveCloudStudy(activeStudy, currentUser.id, { sectionKeys: feedbackKeys, updateCore });
+        await markStudyFeedbackCorrected(activeStudy.id);
+      }
+
+      const correctedFeedback: TerminalFeedbackData = {
+        ...activeStudy.feedbackData,
+        status: "corrected",
+        correctedById: currentUser.id,
+        correctedByName: currentUser.name,
+        correctedAt: new Date().toISOString(),
+      };
+      const updatedStudy = { ...activeStudy, feedbackData: correctedFeedback };
+      setActiveStudy(updatedStudy);
+      setStudies(prev => prev.map(study => study.id === updatedStudy.id ? updatedStudy : study));
+
+      try {
+        await notifyTerminalOfficerFeedbackCorrected({
+          vesselName: activeStudy.vesselName,
+          shipOfficerName: currentUser.name,
+          terminalEmail: assignedTerminal.email.trim(),
+          parts: activeStudy.feedbackData.items,
+        });
+        showToast(`Corrections completed. ${assignedTerminal.name} has been notified for re-review.`, "success");
+      } catch (emailError) {
+        console.error("[Feedback completion email failed]", emailError);
+        showToast("Corrections were saved, but the notification email could not be sent. Please inform the Terminal Officer.", "error");
+      }
+    } catch (err) {
+      console.error("[Feedback completion failed]", err);
+      showToast(err instanceof Error ? err.message : "Unable to confirm feedback corrections.", "error");
+    } finally {
+      setFeedbackCompletionSending(false);
+    }
+  }
+
   function submitStudy() {
     if (!activeStudy || !currentUser) return;
     const studyVessel = vessels.find(v => v.id === activeStudy.vesselId);
@@ -2179,7 +2246,7 @@ export default function App() {
       reviewedById: currentUser.id,
       reviewedByName: currentUser.name,
       approvedAt: new Date().toISOString(),
-      feedbackData: activeStudy.feedbackData?.status === "open"
+      feedbackData: activeStudy.feedbackData && activeStudy.feedbackData.status !== "none"
         ? { ...activeStudy.feedbackData, status: "closed" }
         : (activeStudy.feedbackData ?? defaultTerminalFeedbackData()),
     });
@@ -3393,6 +3460,11 @@ export default function App() {
               <ClipboardList className="w-5 h-5 text-primary" />
               <h2 className="font-mono text-sm font-bold text-foreground uppercase tracking-wide">SSCS Study</h2>
               {study && <StudyBadge status={study.status} />}
+              {study?.status === "submitted" && study.feedbackData?.status === "open" && (
+                <span className="inline-flex items-center gap-1 rounded border border-violet-500/30 bg-violet-500/10 px-2 py-1 font-mono text-[9px] font-semibold uppercase tracking-widest text-violet-500">
+                  <AlertCircle className="w-3 h-3" />Correction Required
+                </span>
+              )}
             </div>
 
             {/* ── No study yet ─────────────────────────────────────────── */}
@@ -3653,6 +3725,7 @@ export default function App() {
     const shipHasVesselAccess = isShip && hasApprovedVesselAccess(activeStudy.vesselId, uid);
 
     const feedbackOpen = activeStudy.feedbackData?.status === "open";
+    const feedbackCorrected = activeStudy.feedbackData?.status === "corrected";
     const feedbackSectionSelected = Boolean(
       feedbackOpen && activeStudy.feedbackData?.items.some(item => item.section === studyTab)
     );
@@ -3736,15 +3809,19 @@ export default function App() {
             </div>
           )}
 
-          {feedbackOpen && activeStudy.feedbackData && (
-            <div className="mb-4 rounded border border-violet-500/30 bg-violet-500/5 px-4 py-3">
+          {(feedbackOpen || feedbackCorrected) && activeStudy.feedbackData && (
+            <div className={`mb-4 rounded border px-4 py-3 ${feedbackCorrected ? "border-emerald-500/30 bg-emerald-500/5" : "border-violet-500/30 bg-violet-500/5"}`}>
               <div className="flex items-start gap-2.5">
-                <AlertCircle className="w-4 h-4 text-violet-500 mt-0.5 shrink-0" />
+                {feedbackCorrected
+                  ? <CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
+                  : <AlertCircle className="w-4 h-4 text-violet-500 mt-0.5 shrink-0" />}
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <p className="font-mono text-[10px] uppercase tracking-widest text-violet-500 font-bold">Terminal Officer Feedback</p>
+                    <p className={`font-mono text-[10px] uppercase tracking-widest font-bold ${feedbackCorrected ? "text-emerald-500" : "text-violet-500"}`}>
+                      {feedbackCorrected ? "Corrections Completed — Awaiting Terminal Review" : "Terminal Officer Feedback"}
+                    </p>
                     {activeStudy.feedbackData.sentByName && (
-                      <span className="font-mono text-[10px] text-muted-foreground">by {activeStudy.feedbackData.sentByName}</span>
+                      <span className="font-mono text-[10px] text-muted-foreground">feedback by {activeStudy.feedbackData.sentByName}</span>
                     )}
                   </div>
                   <div className="flex flex-wrap gap-1.5 mt-2">
@@ -3764,8 +3841,13 @@ export default function App() {
                     ))}
                   </div>
                   <p className="text-xs text-foreground mt-2 whitespace-pre-wrap">{activeStudy.feedbackData.message}</p>
-                  {isShip && (
+                  {feedbackOpen && isShip && (
                     <p className="font-mono text-[10px] text-violet-500 mt-2">Only the parts listed above are unlocked for correction. Changes are saved automatically while the study remains Submitted.</p>
+                  )}
+                  {feedbackCorrected && (
+                    <p className="font-mono text-[10px] text-emerald-600 mt-2">
+                      {activeStudy.feedbackData.correctedByName ?? "Ship Officer"} reported the corrections completed{activeStudy.feedbackData.correctedAt ? ` on ${fmtDate(activeStudy.feedbackData.correctedAt)}` : ""}. The selected parts are locked again pending Terminal Officer review.
+                    </p>
                   )}
                 </div>
               </div>
@@ -3797,6 +3879,19 @@ export default function App() {
               <button onClick={openStudyFeedbackDialog}
                 className="flex items-center gap-1.5 bg-violet-500/10 text-violet-500 border border-violet-500/20 hover:bg-violet-500/20 font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors">
                 <AlertCircle className="w-3.5 h-3.5" />{feedbackOpen ? "Update Feedback" : "Feedback"}
+              </button>
+            )}
+
+            {/* Ship Officer: confirm feedback corrections and notify the In Charge Terminal Officer */}
+            {isShip && st === "submitted" && feedbackOpen && shipHasVesselAccess && (
+              <button
+                type="button"
+                onClick={() => void confirmFeedbackCorrectionsCompleted()}
+                disabled={feedbackCompletionSending}
+                className="flex items-center gap-1.5 bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-wait font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors"
+              >
+                {feedbackCompletionSending ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <CheckCheck className="w-3.5 h-3.5" />}
+                {feedbackCompletionSending ? "Notifying..." : "Corrections Completed"}
               </button>
             )}
 
@@ -3835,8 +3930,12 @@ export default function App() {
 
             {/* Status messages */}
             {isShip && st === "submitted" && (
-              <p className={`text-xs font-mono ${feedbackOpen ? "text-violet-500" : "text-muted-foreground"}`}>
-                {feedbackOpen ? "Terminal feedback received — open the highlighted parts above to make corrections." : "Awaiting Terminal Officer review."}
+              <p className={`text-xs font-mono ${feedbackOpen ? "text-violet-500" : feedbackCorrected ? "text-emerald-500" : "text-muted-foreground"}`}>
+                {feedbackOpen
+                  ? "Terminal feedback received — correct the highlighted parts, then click Corrections Completed."
+                  : feedbackCorrected
+                    ? "Corrections reported to the In Charge Terminal Officer — awaiting re-review."
+                    : "Awaiting Terminal Officer review."}
               </p>
             )}
             {isShip && st === "edit_requested" && uid === activeStudy.editRequestedById && <p className="text-xs font-mono text-amber-400">Edit request pending approval.</p>}
