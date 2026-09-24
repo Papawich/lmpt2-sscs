@@ -153,6 +153,7 @@ async function send(
   message: string,
   fromName = "LMPT2 SSCS System",
   includeWorkflowCc = false,
+  approvalSummaryHtml = "",
 ): Promise<void> {
   const recipientEmail = normalizeRecipients(toEmail);
   if (!recipientEmail) {
@@ -183,6 +184,7 @@ async function send(
         action_url: appUrl,                                     // → CTA destination
         event_time: formatEventTime(),                          // → Event time in ICT
         preheader: `${visual.statusLabel}: ${subject}`,          // → Inbox preview text
+        approval_summary_html: approvalSummaryHtml,              // → Approval-only HTML summary block
       },
       PUBLIC_KEY!,
     );
@@ -276,6 +278,7 @@ export async function notifyShipOfficerStudyApproved(opts: {
   vesselName: string;
   approvedByName: string;
   shipEmail: string;
+  approvalSummaryHtml?: string;
 }) {
   await send(
     opts.shipEmail,
@@ -283,6 +286,7 @@ export async function notifyShipOfficerStudyApproved(opts: {
     `Your SSCS compatibility study has been approved.\n\nVessel      : ${opts.vesselName}\nApproved by : ${opts.approvedByName}\n\nThe study is now locked and on record.`,
     "LMPT2 SSCS System",
     true,
+    opts.approvalSummaryHtml ?? "",
   );
 }
 
