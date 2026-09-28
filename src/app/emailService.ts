@@ -225,6 +225,21 @@ export async function notifyUserAccountApproved(opts: {
   );
 }
 
+export async function notifyTerminalOfficersVesselAdded(opts: {
+  vesselName: string;
+  imo: string;
+  addedByName: string;
+  addedByEmail: string;
+  sisterShip: boolean;
+  terminalEmail: string | string[];
+}) {
+  return send(
+    opts.terminalEmail,
+    `Vessel Added — ${opts.vesselName}`,
+    `A vessel has been added to the LMPT2 SSCS system.\n\nVessel       : ${opts.vesselName}\nIMO          : ${opts.imo}\nAdded by     : ${opts.addedByName} (${opts.addedByEmail})\nSister ship  : ${opts.sisterShip ? "Yes" : "No"}\n\nPlease log in to the LMPT2 SSCS system to review the vessel and any required follow-up actions.`,
+  );
+}
+
 export async function notifyTerminalOfficerAccessRequest(opts: {
   vesselName: string;
   requesterName: string;

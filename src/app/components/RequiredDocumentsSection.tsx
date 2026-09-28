@@ -153,11 +153,14 @@ interface Props {
   sisterShipVerified?: boolean;
   referenceVesselName?: string;
   inheritedKeys?: DocKey[];
+  canUpdateInherited?: boolean;
+  onReplaceInheritedFile?: (docKey: DocKey, file: File) => Promise<UploadedFile[]>;
 }
 
 export function RequiredDocumentsSection({
   canEdit, data: dp, onChange, onUploadFile, onDeleteFile, getDownloadUrl,
   sisterShip = false, sisterShipVerified = false, referenceVesselName, inheritedKeys = [],
+  canUpdateInherited = false, onReplaceInheritedFile,
 }: Props) {
   const data = dp ?? defaultRequiredDocumentsData();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -179,6 +182,10 @@ export function RequiredDocumentsSection({
     const key = activeKey;
     setLoading(true);
     try {
+      if (inherited.has(key) && onReplaceInheritedFile) {
+        await onReplaceInheritedFile(key, files[0]);
+        return;
+      }
       const uploaded = await Promise.all(
         files.map(async file => {
           if (onUploadFile) return onUploadFile(key, file);
@@ -313,7 +320,7 @@ export function RequiredDocumentsSection({
                   // The Sister Ship Statement must stay editable (subject to the normal
                   // study edit permission) even after sister-ship verification, because
                   // the statement can be revised as additional sister ships are added.
-                  const isLocked = isInherited;
+                  const isLocked = isInherited && !canUpdateInherited;
 
                   return (
                     <div key={key} className={`px-4 py-3 transition-colors ${hasFiles ? "bg-emerald-500/[0.03]" : isNotApplicable ? "bg-slate-500/[0.03]" : ""}`}>
@@ -407,7 +414,7 @@ export function RequiredDocumentsSection({
                               ) : (
                                 <>
                                   <Upload className="w-3 h-3" />
-                                  <span>{hasFiles ? "Add more files" : "Upload file"}</span>
+                                  <span>{isInherited ? "Replace shared file" : hasFiles ? "Add more files" : "Upload file"}</span>
                                 </>
                               )}
                             </button>

@@ -664,6 +664,20 @@ export async function uploadStudyDocument(opts: {
   };
 }
 
+export async function replaceSisterSharedDocument(opts: {
+  vesselId: number;
+  docKey: string;
+  files: CloudUploadedFile[];
+}): Promise<void> {
+  const client = requireSupabase();
+  const { error } = await client.rpc("replace_sister_shared_document", {
+    target_vessel_id: opts.vesselId,
+    target_document_type: opts.docKey,
+    replacement_files: opts.files,
+  });
+  if (error) throw error;
+}
+
 export async function getStudyDocumentUrl(storagePath: string) {
   const client = requireSupabase();
   const { data, error } = await client.storage.from("sscs-documents").createSignedUrl(storagePath, 60);
