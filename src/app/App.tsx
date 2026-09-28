@@ -2379,13 +2379,51 @@ export default function App() {
         if (s.status === "submitted")        return [{ kind: "study" as const, study: s, label: "Study submitted — review & approve", priority: "high" as const }];
         if (s.status === "edit_requested")   return [{ kind: "study" as const, study: s, label: "Edit requested — approve or reject", priority: "normal" as const }];
       } else if (role === "ship_officer") {
-        if (hasApprovedVesselAccess(s.vesselId, uid)) {
-          if (s.status === "draft")   return [{ kind: "study" as const, study: s, label: "Draft incomplete — continue filling", priority: "normal" as const }];
-          if (s.status === "editing") return [{ kind: "study" as const, study: s, label: "Edit approved — continue editing", priority: "high" as const }];
-        }
-        if (s.initiatedById === uid && s.status === "access_requested")
-          return [{ kind: "study" as const, study: s, label: "Awaiting Terminal Officer access approval", priority: "normal" as const }];
-      }
+  if (hasApprovedVesselAccess(s.vesselId, uid)) {
+
+    // Minor Change 2.1:
+    // Show a high-priority task when Terminal Officer sends feedback.
+    if (s.status === "submitted" && s.feedbackData?.status === "open") {
+      const feedbackSections = Array.from(
+        new Set(s.feedbackData.items.map(item => item.section))
+      );
+
+      return [{
+        kind: "study" as const,
+        study: s,
+        label: `CORRECTION REQUIRED — ${feedbackSections.join(", ")}`,
+        priority: "high" as const,
+      }];
+    }
+
+    if (s.status === "draft") {
+      return [{
+        kind: "study" as const,
+        study: s,
+        label: "Draft incomplete — continue filling",
+        priority: "normal" as const,
+      }];
+    }
+
+    if (s.status === "editing") {
+      return [{
+        kind: "study" as const,
+        study: s,
+        label: "Edit approved — continue editing",
+        priority: "high" as const,
+      }];
+    }
+  }
+
+  if (s.initiatedById === uid && s.status === "access_requested") {
+    return [{
+      kind: "study" as const,
+      study: s,
+      label: "Awaiting Terminal Officer access approval",
+      priority: "normal" as const,
+    }];
+  }
+}
       return [];
     });
 
@@ -2408,11 +2446,22 @@ export default function App() {
       return;
     }
     const s = task.study;
-    const v = vessels.find(vessel => vessel.id === s.vesselId);
-    if (v) setSelectedVessel(v);
-    setActiveStudy(s);
-    setShowTaskPanel(false);
-    setPage("study");
+const v = vessels.find(vessel => vessel.id === s.vesselId);
+
+if (v) setSelectedVessel(v);
+
+setActiveStudy(s);
+
+if (
+  s.status === "submitted" &&
+  s.feedbackData?.status === "open" &&
+  s.feedbackData.items.length > 0
+) {
+  setStudyTab(s.feedbackData.items[0].section);
+}
+
+setShowTaskPanel(false);
+setPage("study");
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -4023,7 +4072,7 @@ export default function App() {
                   confirmFeedbackCorrectionsCompleted,
                 )}
                 disabled={feedbackCompletionSending}
-                className="flex items-center gap-1.5 bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-wait font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors"
+                className="flex items-center gap-1.5 bg-violet-500/10 text-violet-500 border border-violet-500/20 hover:bg-violet-500/20 disabled:opacity-50 disabled:cursor-wait font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors"
               >
                 {feedbackCompletionSending ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <CheckCheck className="w-3.5 h-3.5" />}
                 {feedbackCompletionSending ? "Notifying..." : "Corrections Completed"}
@@ -4147,11 +4196,9 @@ export default function App() {
 
                 <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
                   <button type="button" onClick={() => setFeedbackDialogOpen(false)} className="rounded border border-border px-4 py-2 font-mono text-xs text-muted-foreground hover:bg-secondary">Cancel</button>
-                  <button type="button" onClick={() => askConfirmation(
-                    "Send Feedback?",
-                    "Send this feedback to the Ship Officer and unlock only the selected parts for correction?",
-                    sendStudyFeedback,
-                  )} className="flex items-center gap-1.5 rounded bg-violet-600 px-4 py-2 font-mono text-xs font-bold uppercase tracking-wide text-white hover:bg-violet-700">
+                  <button
+  type="button"
+  onClick={sendStudyFeedback} className="flex items-center gap-1.5 rounded bg-violet-600 px-4 py-2 font-mono text-xs font-bold uppercase tracking-wide text-white hover:bg-violet-700">
                     <Send className="w-3.5 h-3.5" />Send Feedback
                   </button>
                 </div>
@@ -4178,6 +4225,9 @@ export default function App() {
                 const tabItems = activeStudy.items.filter(i => i.section === tab.section);
                 const filledCount = tabItems.filter(i => i.value && (!i.requiresDoc || i.documentName) && (!i.requiresExpiry || i.expiryDate)).length;
                 const isActive = studyTab === tab.section;
+                const hasFeedback = Boolean(
+                  feedbackOpen && activeStudy.feedbackData?.items.some(item => item.section === tab.section)
+                );
 
                 const isComplete = isReqDocsTab
                   ? isRequiredDocumentsComplete(activeStudy.requiredDocuments, Boolean(vessel?.isSisterShip))
@@ -4210,7 +4260,11 @@ export default function App() {
                 return (
                   <button key={tab.section} onClick={() => setStudyTab(tab.section)}
                     className={`relative flex items-center gap-1.5 px-3 py-2 rounded text-xs font-mono font-semibold whitespace-nowrap transition-all ${
-                      isActive ? "bg-primary text-primary-foreground shadow" : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+                      hasFeedback
+                        ? "bg-violet-600 text-white shadow hover:bg-violet-700"
+                        : isActive
+                        ? "bg-primary text-primary-foreground shadow"
+                        : "text-muted-foreground hover:text-foreground hover:bg-secondary"
                     }`}>
                     <span className="font-mono text-[10px] opacity-50">{isReqDocsTab ? "0" : idx}.</span>
                     {tab.section}
