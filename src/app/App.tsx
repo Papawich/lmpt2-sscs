@@ -604,7 +604,7 @@ function buildApprovalEmailDraft(vessel: Vessel, study: SSCSStudy) {
   const fwdNums = pattern ? [pattern.fwd1, pattern.fwd2, pattern.fwd3, pattern.fwd4].filter(Boolean) : [];
   const aftNums = pattern ? [pattern.aft1, pattern.aft2, pattern.aft3, pattern.aft4].filter(Boolean) : [];
   const patternStr = fwdNums.length || aftNums.length
-    ? `FWD ${fwdNums.join("+")} / AFT ${aftNums.join("+")}`
+    ? `FWD ${fwdNums.join("+")} / ${aftNums.join("+")} AFT`
     : "—";
 
   const ropeType = study.mooringArrangementData?.mooringRope?.type || "";
