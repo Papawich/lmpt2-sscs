@@ -3908,7 +3908,10 @@ export default function App() {
             <p className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest mr-2">Actions:</p>
 
             {/* Ship Officer: submit */}
-            {((isShip && shipHasVesselAccess) || (isTerminal && st === "draft")) && (st === "draft" || st === "editing") && (
+            {(
+  (isShip && shipHasVesselAccess && (st === "draft" || st === "editing")) ||
+  (isTerminal && (st === "draft" || st === "editing"))
+) && (
               <button onClick={submitStudy}
                 className="flex items-center gap-1.5 bg-primary text-primary-foreground font-mono font-semibold text-xs tracking-widest uppercase px-3.5 py-2 rounded hover:bg-primary/90 transition-all">
                 <Send className="w-3.5 h-3.5" />Submit for Review
