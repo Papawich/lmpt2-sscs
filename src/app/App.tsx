@@ -1015,6 +1015,25 @@ export default function App() {
   const [accessReviewBusyId, setAccessReviewBusyId] = useState<string | null>(null);
   const [revokePreviousOnApprove, setRevokePreviousOnApprove] = useState<Record<string, boolean>>({});
   const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false);
+  const [confirmation, setConfirmation] = useState<{
+    title: string;
+    message: string;
+    onYes: () => void | Promise<void>;
+  } | null>(null);
+
+  function askConfirmation(
+    title: string,
+    message: string,
+    onYes: () => void | Promise<void>,
+  ) {
+    setConfirmation({ title, message, onYes });
+  }
+
+  async function runConfirmedAction() {
+    const action = confirmation?.onYes;
+    setConfirmation(null);
+    if (action) await action();
+  }
   const [feedbackMessage, setFeedbackMessage] = useState("");
   const [feedbackParts, setFeedbackParts] = useState<Record<string, FeedbackAssessment | undefined>>({});
   const [feedbackCompletionSending, setFeedbackCompletionSending] = useState(false);
@@ -2737,6 +2756,42 @@ export default function App() {
               </div>}
         </div>
         <TaskFloater tasks={myTasks} open={showTaskPanel} onToggle={() => setShowTaskPanel(p => !p)} onSelect={goToStudyFromTask} />
+
+        {confirmation && (
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm"
+            onClick={() => setConfirmation(null)}
+          >
+            <div
+              className="w-full max-w-md rounded border border-border bg-card p-5 shadow-2xl"
+              onClick={e => e.stopPropagation()}
+            >
+              <h3 className="font-mono text-sm font-bold uppercase tracking-widest text-foreground">
+                {confirmation.title}
+              </h3>
+              <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                {confirmation.message}
+              </p>
+              <div className="mt-5 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setConfirmation(null)}
+                  className="rounded border border-border px-4 py-2 font-mono text-xs font-bold uppercase tracking-wider text-muted-foreground hover:bg-secondary hover:text-foreground"
+                >
+                  No
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void runConfirmedAction()}
+                  className="rounded bg-primary px-4 py-2 font-mono text-xs font-bold uppercase tracking-wider text-primary-foreground hover:bg-primary/90"
+                >
+                  Yes
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {toast && <Toast {...toast} />}
       </div>
     );
@@ -2990,11 +3045,11 @@ export default function App() {
           return (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm"
               onClick={() => setSummaryVesselId(null)}>
-              <div className="w-full max-w-lg max-h-[calc(100vh-2rem)] bg-card border border-border rounded shadow-2xl overflow-hidden flex flex-col"
+              <div className="w-full max-w-lg bg-card border border-border rounded shadow-2xl overflow-hidden"
                 onClick={e => e.stopPropagation()}>
 
                 {/* Modal header */}
-                <div className="flex items-start justify-between px-5 py-4 border-b border-border bg-secondary/30 shrink-0">
+                <div className="flex items-start justify-between px-5 py-4 border-b border-border bg-secondary/30">
                   <div>
                     <p className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest mb-0.5">SSCS Summary</p>
                     <p className="font-bold text-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
@@ -3017,7 +3072,7 @@ export default function App() {
                 )}
 
                 {/* Rows */}
-                <div className="divide-y divide-border/50 min-h-0 flex-1 overflow-y-auto">
+                <div className="divide-y divide-border/50 max-h-[70vh] overflow-y-auto">
                   {rows.map(({ label, node }) => (
                     <div key={label} className="flex items-start justify-between gap-4 px-5 py-2.5">
                       <span className="font-mono text-xs text-muted-foreground whitespace-nowrap shrink-0">{label}</span>
@@ -3027,7 +3082,7 @@ export default function App() {
                 </div>
 
                 {/* Footer */}
-                <div className="px-5 py-3 border-t border-border bg-secondary/20 flex items-center justify-between shrink-0">
+                <div className="px-5 py-3 border-t border-border bg-secondary/20 flex items-center justify-between">
                   <p className="font-mono text-[10px] text-muted-foreground">{sv.imo} · {sv.type}</p>
                   {ss && (
                     <button onClick={() => { setSummaryVesselId(null); setSelectedVessel(sv); openStudy(ss); }}
@@ -3737,7 +3792,7 @@ export default function App() {
                       <Pencil className="w-3.5 h-3.5" />{study.status === "draft" ? "Continue Filling" : "Continue Editing"}
                     </button>
                   )}
-                  {canShipManageVessel && study.status === "approved" && !study.editRequestedById && (
+                  {canShipManageVessel && study.status === "approved" && !study.editRequestedById && !canKickoff && (
                     <button onClick={() => { syncStudy({ ...study, status: "edit_requested", editRequestedById: currentUser.id, editRequestedByName: currentUser.name, editRequestedAt: new Date().toISOString() }); notifyTerminalOfficersOfEditRequest(study, currentUser); showToast("Edit request sent to Terminal Officer.", "info"); }}
                       className="flex items-center gap-2 px-4 py-2 rounded border border-orange-500/30 bg-orange-500/8 text-orange-400 hover:bg-orange-500/15 text-xs font-mono font-semibold uppercase transition-colors">
                       <Edit3 className="w-3.5 h-3.5" />Request to Edit
@@ -3908,11 +3963,12 @@ export default function App() {
             <p className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest mr-2">Actions:</p>
 
             {/* Ship Officer: submit */}
-            {(
-  (isShip && shipHasVesselAccess && (st === "draft" || st === "editing")) ||
-  (isTerminal && (st === "draft" || st === "editing"))
-) && (
-              <button onClick={submitStudy}
+            {((isShip && shipHasVesselAccess) || (isTerminal && st === "draft")) && (st === "draft" || st === "editing") && (
+              <button onClick={() => askConfirmation(
+                "Submit for Review?",
+                "Submit this SSCS study to the Terminal Officer for review?",
+                submitStudy,
+              )}
                 className="flex items-center gap-1.5 bg-primary text-primary-foreground font-mono font-semibold text-xs tracking-widest uppercase px-3.5 py-2 rounded hover:bg-primary/90 transition-all">
                 <Send className="w-3.5 h-3.5" />Submit for Review
               </button>
@@ -3920,7 +3976,11 @@ export default function App() {
 
             {/* Terminal Officer: approve */}
             {isTerminal && st === "submitted" && (
-              <button onClick={approveStudy}
+              <button onClick={() => askConfirmation(
+                "Approve Study?",
+                "Approve and lock this SSCS study?",
+                approveStudy,
+              )}
                 className="flex items-center gap-1.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors">
                 <BadgeCheck className="w-3.5 h-3.5" />Approve Study
               </button>
@@ -3938,7 +3998,11 @@ export default function App() {
             {isShip && st === "submitted" && feedbackOpen && shipHasVesselAccess && (
               <button
                 type="button"
-                onClick={() => void confirmFeedbackCorrectionsCompleted()}
+                onClick={() => askConfirmation(
+                  "Corrections Completed?",
+                  "Confirm that all requested corrections are completed and notify the Terminal Officer?",
+                  confirmFeedbackCorrectionsCompleted,
+                )}
                 disabled={feedbackCompletionSending}
                 className="flex items-center gap-1.5 bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-wait font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors"
               >
@@ -3949,7 +4013,11 @@ export default function App() {
 
             {/* Ship Officer: request to edit */}
             {shipHasVesselAccess && st === "approved" && !activeStudy.editRequestedById && (
-              <button onClick={requestEdit}
+              <button onClick={() => askConfirmation(
+                "Request Edit?",
+                "Send a request to the Terminal Officer to edit this approved SSCS study?",
+                requestEdit,
+              )}
                 className="flex items-center gap-1.5 bg-orange-500/10 text-orange-400 border border-orange-500/20 hover:bg-orange-500/20 font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors">
                 <Edit3 className="w-3.5 h-3.5" />Request to Edit
               </button>
@@ -3958,11 +4026,19 @@ export default function App() {
             {/* Terminal Officer: approve/reject edit request */}
             {isTerminal && st === "edit_requested" && (
               <>
-                <button onClick={approveEditRequest}
+                <button onClick={() => askConfirmation(
+                  "Approve Edit Request?",
+                  "Allow the Ship Officer to edit this approved SSCS study?",
+                  approveEditRequest,
+                )}
                   className="flex items-center gap-1.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors">
                   <CheckCircle2 className="w-3.5 h-3.5" />Approve Edit
                 </button>
-                <button onClick={rejectEditRequest}
+                <button onClick={() => askConfirmation(
+                  "Reject Edit Request?",
+                  "Reject this edit request and keep the SSCS study locked?",
+                  rejectEditRequest,
+                )}
                   className="flex items-center gap-1.5 bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 font-mono font-semibold text-xs uppercase px-3.5 py-2 rounded transition-colors">
                   <XCircle className="w-3.5 h-3.5" />Reject Edit
                 </button>
@@ -4052,7 +4128,11 @@ export default function App() {
 
                 <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
                   <button type="button" onClick={() => setFeedbackDialogOpen(false)} className="rounded border border-border px-4 py-2 font-mono text-xs text-muted-foreground hover:bg-secondary">Cancel</button>
-                  <button type="button" onClick={sendStudyFeedback} className="flex items-center gap-1.5 rounded bg-violet-600 px-4 py-2 font-mono text-xs font-bold uppercase tracking-wide text-white hover:bg-violet-700">
+                  <button type="button" onClick={() => askConfirmation(
+                    "Send Feedback?",
+                    "Send this feedback to the Ship Officer and unlock only the selected parts for correction?",
+                    sendStudyFeedback,
+                  )} className="flex items-center gap-1.5 rounded bg-violet-600 px-4 py-2 font-mono text-xs font-bold uppercase tracking-wide text-white hover:bg-violet-700">
                     <Send className="w-3.5 h-3.5" />Send Feedback
                   </button>
                 </div>
