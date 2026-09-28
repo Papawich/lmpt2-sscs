@@ -185,24 +185,62 @@ export function AttachmentsSection({ canEdit, data: dataProp, onChange, onUpload
   );
 }
 
-export function VesselPhotoSummary({ files, getFileUrl }: { files: UploadedFile[]; getFileUrl?: (file: UploadedFile) => Promise<string> }) {
+export function VesselPhotoSummary({
+  files,
+  getFileUrl,
+}: {
+  files: UploadedFile[];
+  getFileUrl?: (file: UploadedFile) => Promise<string>;
+}) {
   const urls = useImageUrls(files, getFileUrl);
+
   if (!files.length) return null;
+
+  const visibleFiles = files.slice(0, 4);
 
   return (
     <div className="px-5 py-4 border-b border-border bg-secondary/10">
-      <p className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest mb-2">Vessel Photo</p>
-      <div className="grid grid-cols-2 gap-2">
-        {files.slice(0, 4).map((file, idx) => {
+      <p className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest mb-2">
+        Vessel Photo
+      </p>
+
+      <div
+        className={`grid gap-2 ${
+          visibleFiles.length === 1
+            ? "grid-cols-1"
+            : "grid-cols-2"
+        }`}
+      >
+        {visibleFiles.map(file => {
           const src = urls[file.id] || file.dataUrl;
+
           return (
-            <div key={file.id} className={`${idx === 0 && files.length === 1 ? "col-span-2" : ""} aspect-[16/9] rounded border border-border overflow-hidden bg-secondary/40 flex items-center justify-center`}>
-              {src ? <img src={src} alt={file.name} className="w-full h-full object-cover" /> : <ImageIcon className="w-7 h-7 text-muted-foreground/40" />}
+            <div
+              key={file.id}
+              className="rounded border border-border overflow-hidden bg-secondary/20"
+            >
+              {src ? (
+                <img
+                  src={src}
+                  alt={file.name}
+                  className="block w-full h-auto max-h-[28vh] object-contain"
+                />
+              ) : (
+                <div className="h-32 flex items-center justify-center">
+                  <ImageIcon className="w-7 h-7 text-muted-foreground/40" />
+                </div>
+              )}
             </div>
           );
         })}
       </div>
-      {files.length > 4 && <p className="font-mono text-[9px] text-muted-foreground mt-2">+ {files.length - 4} more photo{files.length - 4 === 1 ? "" : "s"}</p>}
+
+      {files.length > 4 && (
+        <p className="font-mono text-[9px] text-muted-foreground mt-2">
+          + {files.length - 4} more photo
+          {files.length - 4 === 1 ? "" : "s"}
+        </p>
+      )}
     </div>
   );
 }

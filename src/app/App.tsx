@@ -1018,21 +1018,35 @@ export default function App() {
   const [confirmation, setConfirmation] = useState<{
     title: string;
     message: string;
-    onYes: () => void | Promise<void>;
   } | null>(null);
+  const confirmationActionRef = useRef<(() => void | Promise<void>) | null>(null);
 
   function askConfirmation(
     title: string,
     message: string,
     onYes: () => void | Promise<void>,
   ) {
-    setConfirmation({ title, message, onYes });
+    confirmationActionRef.current = onYes;
+    setConfirmation({ title, message });
+  }
+
+  function cancelConfirmation() {
+    confirmationActionRef.current = null;
+    setConfirmation(null);
   }
 
   async function runConfirmedAction() {
-    const action = confirmation?.onYes;
+    const action = confirmationActionRef.current;
+    confirmationActionRef.current = null;
     setConfirmation(null);
-    if (action) await action();
+    if (!action) return;
+
+    try {
+      await action();
+    } catch (err) {
+      console.error("[Confirmed action failed]", err);
+      showToast("Action failed. Please try again.", "error");
+    }
   }
   const [feedbackMessage, setFeedbackMessage] = useState("");
   const [feedbackParts, setFeedbackParts] = useState<Record<string, FeedbackAssessment | undefined>>({});
@@ -2760,7 +2774,7 @@ export default function App() {
         {confirmation && (
           <div
             className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm"
-            onClick={() => setConfirmation(null)}
+            onClick={cancelConfirmation}
           >
             <div
               className="w-full max-w-md rounded border border-border bg-card p-5 shadow-2xl"
@@ -2775,7 +2789,7 @@ export default function App() {
               <div className="mt-5 flex justify-end gap-2">
                 <button
                   type="button"
-                  onClick={() => setConfirmation(null)}
+                  onClick={cancelConfirmation}
                   className="rounded border border-border px-4 py-2 font-mono text-xs font-bold uppercase tracking-wider text-muted-foreground hover:bg-secondary hover:text-foreground"
                 >
                   No
@@ -3045,11 +3059,11 @@ export default function App() {
           return (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm"
               onClick={() => setSummaryVesselId(null)}>
-              <div className="w-full max-w-lg bg-card border border-border rounded shadow-2xl overflow-hidden"
+              <div className="w-full max-w-lg max-h-[calc(100vh-2rem)] bg-card border border-border rounded shadow-2xl overflow-hidden flex flex-col"
                 onClick={e => e.stopPropagation()}>
 
                 {/* Modal header */}
-                <div className="flex items-start justify-between px-5 py-4 border-b border-border bg-secondary/30">
+                <div className="flex items-start justify-between px-5 py-4 border-b border-border bg-secondary/30 shrink-0">
                   <div>
                     <p className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest mb-0.5">SSCS Summary</p>
                     <p className="font-bold text-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
@@ -3065,14 +3079,16 @@ export default function App() {
                 </div>
 
                 {showSubmittedPhotos && vesselPhotos.length > 0 && (
-                  <VesselPhotoSummary
-                    files={vesselPhotos}
-                    getFileUrl={supabaseConfigured ? handleDocumentDownload : undefined}
-                  />
+                  <div className="shrink-0 max-h-[32vh] overflow-hidden [&_img]:max-h-[27vh] [&_img]:w-full [&_img]:object-contain">
+                    <VesselPhotoSummary
+                      files={vesselPhotos}
+                      getFileUrl={supabaseConfigured ? handleDocumentDownload : undefined}
+                    />
+                  </div>
                 )}
 
                 {/* Rows */}
-                <div className="divide-y divide-border/50 max-h-[70vh] overflow-y-auto">
+                <div className="divide-y divide-border/50 flex-1 min-h-0 overflow-y-auto">
                   {rows.map(({ label, node }) => (
                     <div key={label} className="flex items-start justify-between gap-4 px-5 py-2.5">
                       <span className="font-mono text-xs text-muted-foreground whitespace-nowrap shrink-0">{label}</span>
@@ -3082,7 +3098,7 @@ export default function App() {
                 </div>
 
                 {/* Footer */}
-                <div className="px-5 py-3 border-t border-border bg-secondary/20 flex items-center justify-between">
+                <div className="px-5 py-3 border-t border-border bg-secondary/20 flex items-center justify-between shrink-0">
                   <p className="font-mono text-[10px] text-muted-foreground">{sv.imo} · {sv.type}</p>
                   {ss && (
                     <button onClick={() => { setSummaryVesselId(null); setSelectedVessel(sv); openStudy(ss); }}
@@ -3848,15 +3864,18 @@ export default function App() {
     const canRenameShip = Boolean(vessel && (isTerminal || currentUser.isAdmin || shipHasVesselAccess));
     const verifiedSisterShip = Boolean(vessel?.isSisterShip && vessel.sisterShipStatus === "verified");
     const referenceVessel = vessel?.referenceVesselId ? vessels.find(candidate => candidate.id === vessel.referenceVesselId) : undefined;
-    const inheritedSectionReadOnly = (section: string) => verifiedSisterShip && [
-      "Fender / Flat Body",
-      "Mooring Arrangement",
-      "Gangway",
-      "Unloading Arm",
-      "Cargo Management",
-      "Ship Shore Link System",
-      "Utility System",
-    ].includes(section);
+    const inheritedSectionReadOnly = (section: string) =>
+  verifiedSisterShip &&
+  st !== "editing" &&
+  [
+    "Fender / Flat Body",
+    "Mooring Arrangement",
+    "Gangway",
+    "Unloading Arm",
+    "Cargo Management",
+    "Ship Shore Link System",
+    "Utility System",
+  ].includes(section);
 
     return (
       <div className="min-h-screen bg-background" style={font}>
@@ -4579,6 +4598,41 @@ export default function App() {
           </div>
         </div>
         <TaskFloater tasks={myTasks} open={showTaskPanel} onToggle={() => setShowTaskPanel(p => !p)} onSelect={goToStudyFromTask} />
+        {confirmation && (
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm"
+            onClick={cancelConfirmation}
+          >
+            <div
+              className="w-full max-w-md rounded border border-border bg-card p-5 shadow-2xl"
+              onClick={e => e.stopPropagation()}
+            >
+              <h3 className="font-mono text-sm font-bold uppercase tracking-widest text-foreground">
+                {confirmation.title}
+              </h3>
+              <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                {confirmation.message}
+              </p>
+              <div className="mt-5 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={cancelConfirmation}
+                  className="rounded border border-border px-4 py-2 font-mono text-xs font-bold uppercase tracking-wider text-muted-foreground hover:bg-secondary hover:text-foreground"
+                >
+                  No
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void runConfirmedAction()}
+                  className="rounded bg-primary px-4 py-2 font-mono text-xs font-bold uppercase tracking-wider text-primary-foreground hover:bg-primary/90"
+                >
+                  Yes
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {toast && <Toast {...toast} />}
       </div>
     );
