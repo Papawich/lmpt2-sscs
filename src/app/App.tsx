@@ -1765,6 +1765,10 @@ export default function App() {
     return handleDocumentUpload("vessel_photo", file);
   }
 
+  async function handleMooringPatternImageUpload(file: File): Promise<UploadedFile> {
+    return handleDocumentUpload("mooring_pattern_image", file);
+  }
+
   async function handleDocumentDelete(file: UploadedFile) {
     if (supabaseConfigured && file.storagePath) await deleteStudyDocument(file);
   }
@@ -2127,8 +2131,36 @@ export default function App() {
       return;
     }
 
-    const mergedStudy = mergeSisterReferenceStudy(targetStudy, referenceStudy);
+    let mergedStudy = mergeSisterReferenceStudy(targetStudy, referenceStudy);
     try {
+      // Mooring pattern image is sister-ship reference data. Copy the uploaded
+      // reference image into the target study so Storage RLS remains scoped to
+      // the sister ship's own study instead of granting access to the source study.
+      const referencePatternImage = referenceStudy.mooringArrangementData?.patternImage;
+      if (supabaseConfigured && referencePatternImage?.storagePath) {
+        const signedUrl = await getStudyDocumentUrl(referencePatternImage.storagePath);
+        const response = await fetch(signedUrl);
+        if (!response.ok) throw new Error("Unable to read the reference mooring pattern image.");
+        const blob = await response.blob();
+        const copiedFile = new File(
+          [blob],
+          referencePatternImage.name || "mooring-pattern-reference.png",
+          { type: referencePatternImage.type || blob.type || "image/png" },
+        );
+        const copiedImage = await uploadStudyDocument({
+          studyId: targetStudy.id,
+          docKey: "mooring_pattern_image",
+          file: copiedFile,
+          userId: currentUser.id,
+        });
+        mergedStudy = {
+          ...mergedStudy,
+          mooringArrangementData: {
+            ...mergedStudy.mooringArrangementData,
+            patternImage: copiedImage,
+          },
+        };
+      }
       let updatedVessel: Vessel = {
         ...vessel,
         sisterShipStatus: "verified",
@@ -4497,6 +4529,9 @@ setPage("study");
                   canEdit={canEdit && !inheritedSectionReadOnly("Mooring Arrangement")}
                   data={activeStudy.mooringArrangementData ?? defaultMooringArrangementData()}
                   onChange={updateMooringArrangementData}
+                  onUploadPatternImage={supabaseConfigured ? handleMooringPatternImageUpload : undefined}
+                  onDeletePatternImage={supabaseConfigured ? handleDocumentDelete : undefined}
+                  getPatternImageUrl={supabaseConfigured ? handleDocumentDownload : undefined}
                 />
               );
             }

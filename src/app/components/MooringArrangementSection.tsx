@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import mooringPatternReference from "../../imports/mooring-pattern-reference.png";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -14,10 +15,21 @@ export interface MooringPatternData {
   aft1: string; aft2: string; aft3: string; aft4: string;
 }
 
+export interface MooringPatternImageFile {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  uploadedAt: string;
+  storagePath?: string;
+  dataUrl?: string;
+}
+
 export interface MooringArrangementData {
   mooringRope: RopeData;
   tailRope: RopeData;
   pattern: MooringPatternData;
+  patternImage?: MooringPatternImageFile;
 }
 
 export function defaultMooringArrangementData(): MooringArrangementData {
@@ -116,17 +128,80 @@ function PatternDropdown({
 }
 
 function MooringPatternRow({
-  pattern, canEdit, onChange,
-}: { pattern: MooringPatternData; canEdit: boolean; onChange: (p: MooringPatternData) => void }) {
+  pattern, patternImage, canEdit, onChange, onUploadImage, onDeleteImage, getImageUrl,
+}: {
+  pattern: MooringPatternData;
+  patternImage?: MooringPatternImageFile;
+  canEdit: boolean;
+  onChange: (p: MooringPatternData) => void;
+  onUploadImage?: (file: File) => Promise<MooringPatternImageFile>;
+  onDeleteImage?: (file: MooringPatternImageFile) => Promise<void>;
+  getImageUrl?: (file: MooringPatternImageFile) => Promise<string>;
+}) {
   const set = (k: keyof MooringPatternData, v: string) => onChange({ ...pattern, [k]: v });
 
   const fwdKeys: (keyof MooringPatternData)[] = ["fwd1", "fwd2", "fwd3", "fwd4"];
   const aftKeys: (keyof MooringPatternData)[] = ["aft1", "aft2", "aft3", "aft4"];
   const fwdLabels = ["HL", "FS", "FS", "FB"];
   const aftLabels = ["AB", "AS", "AS", "AL"];
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [imageUrl, setImageUrl] = useState(mooringPatternReference);
+  const [uploading, setUploading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!patternImage) {
+      setImageUrl(mooringPatternReference);
+      return () => { cancelled = true; };
+    }
+    if (patternImage.dataUrl) {
+      setImageUrl(patternImage.dataUrl);
+      return () => { cancelled = true; };
+    }
+    if (getImageUrl) {
+      getImageUrl(patternImage)
+        .then(url => { if (!cancelled) setImageUrl(url); })
+        .catch(() => { if (!cancelled) setImageUrl(mooringPatternReference); });
+    }
+    return () => { cancelled = true; };
+  }, [patternImage?.id, patternImage?.storagePath, patternImage?.dataUrl, getImageUrl]);
+
+  async function chooseImage(file?: File) {
+    if (!file || !onUploadImage) return;
+    if (!file.type.startsWith("image/")) return;
+    setUploading(true);
+    try {
+      if (patternImage && onDeleteImage) await onDeleteImage(patternImage);
+      await onUploadImage(file);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
 
   return (
     <div className="border border-border rounded bg-card/50 p-5">
+      <div className="mb-5 rounded border border-border bg-background/70 p-3">
+        <div className="flex items-center justify-between gap-3 mb-2">
+          <div>
+            <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-primary">Mooring Pattern Reference</p>
+            <p className="font-mono text-[9px] text-muted-foreground mt-0.5">Reference orientation for FWD / AFT. Uploaded image replaces the example.</p>
+          </div>
+          {canEdit && onUploadImage && (
+            <>
+              <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
+                onChange={e => void chooseImage(e.target.files?.[0])} />
+              <button type="button" disabled={uploading} onClick={() => fileInputRef.current?.click()}
+                className="shrink-0 rounded border border-primary/40 bg-primary/5 px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-wide text-primary hover:bg-primary/10 disabled:opacity-50">
+                {uploading ? "Uploading…" : patternImage ? "Replace Image" : "Attach Image"}
+              </button>
+            </>
+          )}
+        </div>
+        <img src={imageUrl} alt="Mooring pattern reference showing vessel orientation" className="w-full max-h-[300px] object-contain rounded bg-white" />
+        {patternImage && <p className="mt-1.5 truncate text-center font-mono text-[9px] text-muted-foreground">{patternImage.name}</p>}
+      </div>
+
       <div className="flex items-center justify-center gap-2 flex-wrap">
         <span className="font-mono text-xs font-bold text-primary uppercase tracking-widest">FWD</span>
         {fwdKeys.map((k, i) => (
@@ -167,11 +242,14 @@ interface Props {
   canEdit: boolean;
   data: MooringArrangementData;
   onChange: (d: MooringArrangementData) => void;
+  onUploadPatternImage?: (file: File) => Promise<MooringPatternImageFile>;
+  onDeletePatternImage?: (file: MooringPatternImageFile) => Promise<void>;
+  getPatternImageUrl?: (file: MooringPatternImageFile) => Promise<string>;
 }
 
 type SubTab = "rope" | "pattern";
 
-export function MooringArrangementSection({ canEdit, data: dataProp, onChange }: Props) {
+export function MooringArrangementSection({ canEdit, data: dataProp, onChange, onUploadPatternImage, onDeletePatternImage, getPatternImageUrl }: Props) {
   const data = dataProp ?? defaultMooringArrangementData();
   const [subTab, setSubTab] = useState<SubTab>("rope");
 
@@ -233,8 +311,16 @@ export function MooringArrangementSection({ canEdit, data: dataProp, onChange }:
         )}
 
         {subTab === "pattern" && (
-          <MooringPatternRow pattern={data.pattern} canEdit={canEdit}
-            onChange={p => onChange({ ...data, pattern: p })} />
+          <MooringPatternRow pattern={data.pattern} patternImage={data.patternImage} canEdit={canEdit}
+            onChange={p => onChange({ ...data, pattern: p })}
+            onUploadImage={async file => {
+              if (!onUploadPatternImage) throw new Error("Mooring pattern upload is unavailable.");
+              const uploaded = await onUploadPatternImage(file);
+              onChange({ ...data, patternImage: uploaded });
+              return uploaded;
+            }}
+            onDeleteImage={onDeletePatternImage}
+            getImageUrl={getPatternImageUrl} />
         )}
       </div>
     </div>
