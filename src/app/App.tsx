@@ -3012,7 +3012,7 @@ setPage("study");
           const fwdNums = mp ? [mp.fwd1, mp.fwd2, mp.fwd3, mp.fwd4].filter(Boolean) : [];
           const aftNums = mp ? [mp.aft1, mp.aft2, mp.aft3, mp.aft4].filter(Boolean) : [];
           const patternStr = fwdNums.length || aftNums.length
-            ? `FWD ${fwdNums.join("+")} / AFT ${aftNums.join("+")}`
+            ? `FWD ${fwdNums.join("+")} / ${aftNums.join("+")} AFT`
             : "—";
 
           // Rope types
