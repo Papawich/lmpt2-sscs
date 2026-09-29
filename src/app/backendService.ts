@@ -478,6 +478,13 @@ export async function updateSisterShipVerification(opts: {
   return vesselFromRow(data);
 }
 
+export async function fetchApprovedSisterReferenceVesselIds(): Promise<number[]> {
+  const client = requireSupabase();
+  const { data, error } = await client.rpc("list_approved_sister_reference_vessels");
+  if (error) throw error;
+  return (data ?? []).map((row: any) => Number(row.vessel_id));
+}
+
 export async function fetchStudies(defaults: Record<string, () => any>): Promise<AnyStudy[]> {
   const client = requireSupabase();
   const [{ data: studyRows, error: studyError }, { data: sectionRows, error: sectionError }] = await Promise.all([

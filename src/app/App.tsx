@@ -11,6 +11,7 @@ import heroBg from "../imports/image-8.png";
 import {
   notifyAdminNewRegistration,
   notifyUserAccountApproved,
+  notifyTerminalOfficersVesselAdded,
   notifyTerminalOfficerAccessRequest,
   notifyShipOfficerAccessApproved,
   notifyShipOfficerAccessRejected,
@@ -47,6 +48,7 @@ import {
   createVessel as createCloudVessel,
   renameVesselEverywhere,
   updateSisterShipVerification,
+  fetchApprovedSisterReferenceVesselIds,
   fetchStudies,
   saveStudy as saveCloudStudy,
   markStudyFeedbackCorrected,
@@ -1150,6 +1152,7 @@ export default function App() {
   const [addVIsSister, setAddVIsSister]   = useState(false);
   const [addVReferenceSearch, setAddVReferenceSearch] = useState("");
   const [addVReferenceVesselId, setAddVReferenceVesselId] = useState<number | null>(null);
+  const [approvedSisterReferenceVesselIds, setApprovedSisterReferenceVesselIds] = useState<number[]>([]);
   const [addVSisterStatement, setAddVSisterStatement] = useState<File | null>(null);
 
   const pendingCount = users.filter(u => !u.isAdmin && u.status === "pending").length
@@ -1157,7 +1160,7 @@ export default function App() {
       ? vesselAccesses.filter(access => access.status === "pending").length
       : 0);
   const addVReferenceCandidates = vessels
-    .filter(v => !!getLatestApprovedStudy(studies, v.id))
+    .filter(v => approvedSisterReferenceVesselIds.includes(v.id))
     .filter(v => {
       const q = addVReferenceSearch.trim().toLowerCase();
       return !q || [v.name, v.imo, v.callSign].some(value => (value || "").toLowerCase().includes(q));
@@ -1211,17 +1214,19 @@ export default function App() {
 
   async function loadCloudData() {
     if (!supabaseConfigured) return;
-    const [cloudUsers, cloudVesselAccesses, cloudVessels, cloudStudies] = await Promise.all([
+    const [cloudUsers, cloudVesselAccesses, cloudVessels, cloudStudies, cloudApprovedReferenceVesselIds] = await Promise.all([
       fetchProfiles(),
       fetchVesselAccesses(),
       fetchVessels(),
       fetchStudies(CLOUD_STUDY_DEFAULTS),
+      fetchApprovedSisterReferenceVesselIds(),
     ]);
     const loadedVessels = cloudVessels as Vessel[];
     const vesselMap = new Map(loadedVessels.map(vessel => [vessel.id, vessel]));
     setUsers(cloudUsers as UserAccount[]);
     setVesselAccesses(cloudVesselAccesses);
     setVessels(loadedVessels);
+    setApprovedSisterReferenceVesselIds(cloudApprovedReferenceVesselIds);
     setStudies((cloudStudies as SSCSStudy[]).map(study => withCanonicalVesselIdentity(study, vesselMap.get(study.vesselId))));
   }
 
@@ -1980,7 +1985,7 @@ export default function App() {
       : undefined;
     if (addVIsSister && !referenceVessel)
       return setAddVErr("Please select the reference vessel for this sister ship.");
-    if (addVIsSister && referenceVessel && !getLatestApprovedStudy(studies, referenceVessel.id))
+    if (addVIsSister && referenceVessel && !approvedSisterReferenceVesselIds.includes(referenceVessel.id))
       return setAddVErr("The reference vessel must have an approved SSCS study before it can be used as a sister ship reference.");
     if (addVIsSister && !addVSisterStatement)
       return setAddVErr("Please attach the Sister Ship Statement.");
@@ -2063,6 +2068,18 @@ export default function App() {
     setShowAddVessel(false);
     resetAddVesselForm();
     setSelectedVessel(newVessel);
+
+    const terminalEmails = approvedTerminalEmails();
+    if (terminalEmails.length) {
+      void notifyTerminalOfficersVesselAdded({
+        vesselName: newVessel.name,
+        imo: newVessel.imo,
+        addedByName: currentUser.name,
+        addedByEmail: currentUser.email,
+        sisterShip: Boolean(newVessel.isSisterShip),
+        terminalEmail: terminalEmails,
+      }).catch(err => console.error("[Vessel added email failed]", err));
+    }
 
     if (currentUser.role === "ship_officer" && newStudy) {
       setActiveStudy(newStudy);
@@ -3995,6 +4012,10 @@ setPage("study");
     const st         = activeStudy.status;
     const uid        = currentUser.id;
     const shipHasVesselAccess = isShip && hasApprovedVesselAccess(activeStudy.vesselId, uid);
+    const studyVesselForVerification = vessels.find(v => v.id === activeStudy.vesselId);
+    const sisterVerificationPending = Boolean(
+      studyVesselForVerification?.isSisterShip && studyVesselForVerification.sisterShipStatus === "pending"
+    );
 
     const feedbackOpen = activeStudy.feedbackData?.status === "open";
     const feedbackCorrected = activeStudy.feedbackData?.status === "corrected";
@@ -4002,10 +4023,12 @@ setPage("study");
       feedbackOpen && activeStudy.feedbackData?.items.some(item => item.section === studyTab)
     );
     const canEdit =
-      (st === "draft"    && (isTerminal || shipHasVesselAccess)) ||
-      (st === "submitted" && isTerminal) ||
-      (st === "submitted" && isShip && shipHasVesselAccess && feedbackSectionSelected) ||
-      (st === "editing"   && (isTerminal || shipHasVesselAccess));
+      !sisterVerificationPending && (
+        (st === "draft"    && (isTerminal || shipHasVesselAccess)) ||
+        (st === "submitted" && isTerminal) ||
+        (st === "submitted" && isShip && shipHasVesselAccess && feedbackSectionSelected) ||
+        (st === "editing"   && (isTerminal || shipHasVesselAccess))
+      );
 
     // Once approved, the SSCS content is read-only for every role.
     // Any further content change must start a new approved Edit cycle first.
@@ -4038,6 +4061,18 @@ setPage("study");
             className="flex items-center gap-2 text-xs font-mono text-muted-foreground hover:text-foreground transition-colors mb-6">
             <ArrowLeft className="w-3.5 h-3.5" />Back to {activeStudy.vesselName}
           </button>
+
+          {sisterVerificationPending && (
+            <div className="mb-4 rounded border border-amber-500/30 bg-amber-500/10 px-4 py-3 flex items-start gap-3">
+              <Clock className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
+              <div>
+                <p className="font-mono text-xs font-semibold uppercase tracking-wide text-amber-400">Waiting for Sister Ship Verification</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  SSCS data entry is locked until a Terminal Officer verifies the sister-ship reference. After verification, approved reference data will be copied into this study automatically.
+                </p>
+              </div>
+            </div>
+          )}
 
           {/* Study header */}
           <div className="border border-border rounded bg-card p-6 mb-4">

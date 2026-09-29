@@ -236,7 +236,7 @@ export async function notifyTerminalOfficersVesselAdded(opts: {
   return send(
     opts.terminalEmail,
     `Vessel Added — ${opts.vesselName}`,
-    `A vessel has been added to the LMPT2 SSCS system.\n\nVessel       : ${opts.vesselName}\nIMO          : ${opts.imo}\nAdded by     : ${opts.addedByName} (${opts.addedByEmail})\nSister ship  : ${opts.sisterShip ? "Yes" : "No"}\n\nPlease log in to the LMPT2 SSCS system to review the vessel and any required follow-up actions.`,
+    `A vessel has been added to the LMPT2 SSCS system.\n\nVessel       : ${opts.vesselName}\nIMO          : ${opts.imo}\nAdded by     : ${opts.addedByName} (${opts.addedByEmail})\nSister ship  : ${opts.sisterShip ? "Yes" : "No"}\n\n${opts.sisterShip ? "Action required: Please log in and verify or reject the Sister Ship Reference before the Ship Officer can enter SSCS data." : "Please log in to the LMPT2 SSCS system to review the vessel and any required follow-up actions."}`,
   );
 }
 
