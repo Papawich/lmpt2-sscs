@@ -1180,6 +1180,16 @@ export default function App() {
     return vesselAccesses.filter(access => access.vesselId === vesselId && access.status === "approved");
   }
 
+  // Ship Officers may only open/read SSCS study details for vessels they are
+  // explicitly authorised to manage. Terminal Officers, Admins and Viewers keep
+  // their existing behaviour. This is a UI guard; Supabase RLS must enforce the
+  // same rule server-side so unauthorised study rows are never returned.
+  function canViewStudy(vesselId: number) {
+    if (!currentUser) return false;
+    if (currentUser.isAdmin || currentUser.role !== "ship_officer") return true;
+    return hasApprovedVesselAccess(vesselId, currentUser.id);
+  }
+
   function showToast(msg: string, type: "success" | "error" | "info" = "success") {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 3000);
@@ -1761,6 +1771,10 @@ export default function App() {
   }
 
   function openStudy(study: SSCSStudy) {
+    if (!canViewStudy(study.vesselId)) {
+      showToast("Access required — claim or request vessel access to view this SSCS study.", "error");
+      return;
+    }
     const vessel = vessels.find(candidate => candidate.id === study.vesselId);
     setActiveStudy(withCanonicalVesselIdentity(study, vessel));
     setShipNameEditing(false);
@@ -2483,6 +2497,15 @@ export default function App() {
     const s = task.study;
 const v = vessels.find(vessel => vessel.id === s.vesselId);
 
+if (!canViewStudy(s.vesselId)) {
+  if (v) setSelectedVessel(v);
+  setActiveStudy(null);
+  setShowTaskPanel(false);
+  setPage("vessel");
+  showToast("Access required — claim or request vessel access to view this SSCS study.", "error");
+  return;
+}
+
 if (v) setSelectedVessel(v);
 
 setActiveStudy(s);
@@ -3029,6 +3052,46 @@ setPage("study");
           const sv = vessels.find(v => v.id === summaryVesselId);
           const ss = getLatestStudy(studies, summaryVesselId);
           if (!sv) return null;
+
+          // Keep every vessel visible in the database, but do not expose study
+          // summary/detail data to a Ship Officer without approved vessel access.
+          if (ss && !canViewStudy(sv.id)) {
+            return (
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm"
+                onClick={() => setSummaryVesselId(null)}>
+                <div className="w-full max-w-md bg-card border border-border rounded shadow-2xl overflow-hidden"
+                  onClick={e => e.stopPropagation()}>
+                  <div className="flex items-start justify-between px-5 py-4 border-b border-border bg-secondary/30">
+                    <div>
+                      <p className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest mb-0.5">SSCS Summary</p>
+                      <p className="font-bold text-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
+                        {sv.name.toUpperCase()}
+                      </p>
+                    </div>
+                    <button onClick={() => setSummaryVesselId(null)} className="text-muted-foreground hover:text-foreground transition-colors mt-0.5">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="p-5">
+                    <div className="flex items-start gap-2.5 p-3 rounded bg-amber-500/8 border border-amber-500/25">
+                      <ShieldCheck className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
+                      <div>
+                        <p className="font-mono text-xs font-semibold text-amber-400 uppercase tracking-wide">Access required</p>
+                        <p className="text-xs text-muted-foreground mt-1">Claim or request vessel access before viewing this vessel&apos;s SSCS study.</p>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="px-5 py-3 border-t border-border bg-secondary/20 flex items-center justify-between">
+                    <p className="font-mono text-[10px] text-muted-foreground">{sv.imo} · {sv.type}</p>
+                    <button onClick={() => { setSummaryVesselId(null); setSelectedVessel(sv); setPage("vessel"); }}
+                      className="font-mono text-[11px] text-primary hover:text-primary/80 transition-colors flex items-center gap-1">
+                      Request Access <ChevronRight className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          }
 
           const gi = (id: string) => ss?.items.find(i => i.id === id)?.value ?? "";
           const vesselPhotos = ss?.attachmentData?.vesselPhotos ?? [];
@@ -3843,20 +3906,21 @@ setPage("study");
                   </div>
                 )}
 
-                {/* Cross-company notice for other Ship Officers */}
+                {/* Ship Officers without approved vessel access must not view study data. */}
                 {isShip && !canShipManageVessel && (
-                  <div className="flex items-start gap-2 p-3 rounded bg-secondary border border-border text-xs text-muted-foreground">
-                    <Info className="w-3.5 h-3.5 mt-0.5 shrink-0 text-sky-400" />
-                    <span>This study was originally initiated by <span className="font-mono text-foreground">{study.initiatedByName}</span>. You can view it, but vessel access approval is required before you can modify or request edits.</span>
+                  <div className="flex items-start gap-2 p-3 rounded bg-amber-500/8 border border-amber-500/25 text-xs text-muted-foreground">
+                    <ShieldCheck className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-400" />
+                    <span>Access required — claim or request vessel access in the Vessel Access panel above before viewing this vessel&apos;s SSCS study.</span>
                   </div>
                 )}
 
                 <div className="flex flex-wrap gap-2 pt-1">
-                  {/* Always: view study */}
-                  <button onClick={() => openStudy(study)}
-                    className="flex items-center gap-2 px-4 py-2 rounded border border-border hover:bg-secondary text-xs font-mono text-muted-foreground hover:text-foreground transition-colors">
-                    <ClipboardList className="w-3.5 h-3.5" />View Study
-                  </button>
+                  {canViewStudy(v.id) && (
+                    <button onClick={() => openStudy(study)}
+                      className="flex items-center gap-2 px-4 py-2 rounded border border-border hover:bg-secondary text-xs font-mono text-muted-foreground hover:text-foreground transition-colors">
+                      <ClipboardList className="w-3.5 h-3.5" />View Study
+                    </button>
+                  )}
 
 
                   {/* Terminal Officer: open a pre-filled email draft; nothing is sent automatically. */}
