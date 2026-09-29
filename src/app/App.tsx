@@ -579,6 +579,38 @@ function withCanonicalVesselIdentity(study: SSCSStudy, vessel?: Vessel): SSCSStu
 }
 
 
+type SunkenBittsPositionResult = {
+  ballastClearance: number | null;
+  loadedClearance: number | null;
+  status: "ok" | "fail" | null;
+};
+
+function calculateSunkenBittsPosition(heightValue: string, ballastDraftValue: string, loadedDraftValue: string): SunkenBittsPositionResult {
+  const height = parseFloat(heightValue);
+  const ballast = parseFloat(ballastDraftValue);
+  const loaded = parseFloat(loadedDraftValue);
+  if ([height, ballast, loaded].some(Number.isNaN)) {
+    return { ballastClearance: null, loadedClearance: null, status: null };
+  }
+  const ballastClearance = height - ballast;
+  const loadedClearance = height - loaded;
+  const inRange = (value: number) => value >= 3.6 && value <= 7.6;
+  return {
+    ballastClearance,
+    loadedClearance,
+    status: inRange(ballastClearance) && inRange(loadedClearance) ? "ok" : "fail",
+  };
+}
+
+function sunkenBittsSummaryLabel(upper: SunkenBittsPositionResult, lower: SunkenBittsPositionResult) {
+  const acceptable: string[] = [];
+  if (upper.status === "ok") acceptable.push("Upper Position");
+  if (lower.status === "ok") acceptable.push("Lower Position");
+  if (acceptable.length > 0) return acceptable.join(" / ");
+  if (upper.status === null && lower.status === null) return "—";
+  return "Firewire is required";
+}
+
 function escapeEmailHtml(value: unknown) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -595,6 +627,9 @@ function buildApprovalEmailDraft(vessel: Vessel, study: SSCSStudy) {
   const loadedDraftVal = gi("gi-21");
   const upperDeckVal = gi("gi-18");
   const manifoldHVal = gi("gi-19");
+  const sunkenUpper = calculateSunkenBittsPosition(gi("gi-24"), ballastDraftVal, loadedDraftVal);
+  const sunkenLower = calculateSunkenBittsPosition(gi("gi-25"), ballastDraftVal, loadedDraftVal);
+  const sunkenBittsLabel = sunkenBittsSummaryLabel(sunkenUpper, sunkenLower);
   const pn = (value: string) => {
     const parsed = parseFloat(value);
     return Number.isNaN(parsed) ? NaN : parsed;
@@ -698,7 +733,7 @@ function buildApprovalEmailDraft(vessel: Vessel, study: SSCSStudy) {
     `2nd Gas Management System: ${vessel.gasMgmt2 || "—"}`,
     `Ballast Draft: ${ballastDraftVal ? `${ballastDraftVal} m.` : "—"}`,
     `Loaded Draft: ${loadedDraftVal ? `${loadedDraftVal} m.` : "—"}`,
-    "Sunken Bitts: To be calculated",
+    `Sunken Bitts: ${sunkenBittsLabel}`,
     `Mooring Pattern: ${patternStr}`,
     `Mooring / Tail Rope: ${ropeStr}`,
     `Gangway Area: ${resultText(gangwayAreaResult)}`,
@@ -718,7 +753,7 @@ function buildApprovalEmailDraft(vessel: Vessel, study: SSCSStudy) {
     ["2nd Gas Management System", vessel.gasMgmt2 || "—"],
     ["Ballast Draft", ballastDraftVal ? `${ballastDraftVal} m.` : "—"],
     ["Loaded Draft", loadedDraftVal ? `${loadedDraftVal} m.` : "—"],
-    ["Sunken Bitts", "To be calculated"],
+    ["Sunken Bitts", sunkenBittsLabel],
     ["Mooring Pattern", patternStr],
     ["Mooring / Tail Rope", ropeStr],
     ["Gangway Area", resultText(gangwayAreaResult)],
@@ -3004,6 +3039,10 @@ setPage("study");
           const loadedDraftVal   = gi("gi-21");
           const upperDeckVal     = gi("gi-18");
           const manifoldHVal     = gi("gi-19");
+          const sunkenUpper = calculateSunkenBittsPosition(gi("gi-24"), ballastDraftVal, loadedDraftVal);
+          const sunkenLower = calculateSunkenBittsPosition(gi("gi-25"), ballastDraftVal, loadedDraftVal);
+          const sunkenBittsLabel = sunkenBittsSummaryLabel(sunkenUpper, sunkenLower);
+          const sunkenBittsAnyAcceptable = sunkenUpper.status === "ok" || sunkenLower.status === "ok";
 
           const pn = (s: string) => { const n = parseFloat(s); return isNaN(n) ? NaN : n; };
 
@@ -3095,7 +3134,7 @@ setPage("study");
             { label: "2nd Gas Management System",  node: <span className="font-mono text-xs text-foreground">{sv.gasMgmt2 || "—"}</span> },
             { label: "Ballast Draft",              node: <span className="font-mono text-xs text-foreground">{ballastDraftVal ? `${ballastDraftVal} m.` : "—"}</span> },
             { label: "Loaded Draft",               node: <span className="font-mono text-xs text-foreground">{loadedDraftVal ? `${loadedDraftVal} m.` : "—"}</span> },
-            { label: "Sunken Bitts",               node: <span className="font-mono text-xs text-muted-foreground italic">To be calculated</span> },
+            { label: "Sunken Bitts",               node: <span className={`font-mono text-xs font-bold ${sunkenBittsAnyAcceptable ? "text-emerald-400" : sunkenBittsLabel === "Firewire is required" ? "text-red-400" : "text-muted-foreground/50"}`}>{sunkenBittsLabel}</span> },
             { label: "Mooring Pattern",            node: <span className="font-mono text-xs text-foreground">{patternStr}</span> },
             { label: "Mooring / Tail Rope",        node: <span className="font-mono text-xs text-foreground">{ropeStr}</span> },
             { label: "Gangway Area",               node: <ResultBadge r={gangwayAreaResult} /> },
@@ -4485,9 +4524,16 @@ setPage("study");
                   const filled = canonicalIdentityValue.trim() !== "";
                   const isShipName = tmpl.id === "gi-01";
                   const isImo = tmpl.id === "gi-02";
+                  const isSunkenUpper = tmpl.id === "gi-24";
+                  const isSunkenLower = tmpl.id === "gi-25";
+                  const ballastDraft = activeStudy.items.find(i => i.id === "gi-20")?.value ?? "";
+                  const loadedDraft = activeStudy.items.find(i => i.id === "gi-21")?.value ?? "";
+                  const sunkenResult = (isSunkenUpper || isSunkenLower)
+                    ? calculateSunkenBittsPosition(canonicalIdentityValue, ballastDraft, loadedDraft)
+                    : null;
                   return (
                     <div key={item.id} className={`px-5 py-2.5 transition-colors ${filled ? "bg-emerald-500/[0.03]" : ""}`}>
-                      <div className="grid items-center gap-x-4" style={{ gridTemplateColumns: "minmax(180px,38%) 1fr auto" }}>
+                      <div className="grid items-center gap-x-4" style={{ gridTemplateColumns: "minmax(180px,38%) 1fr auto auto" }}>
                         <span className="flex items-center gap-2 text-xs text-foreground">
                           <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${filled ? "bg-emerald-400" : "bg-border"}`} />
                           {item.name}
@@ -4556,8 +4602,22 @@ setPage("study");
                           <span className="text-sm text-foreground">{canonicalIdentityValue || <span className="text-muted-foreground/50">—</span>}</span>
                         )}
                         <span className={`font-mono text-xs text-muted-foreground whitespace-nowrap ${tmpl.unit ? "" : "invisible"}`}>{tmpl.unit ?? "·"}</span>
+                        {(isSunkenUpper || isSunkenLower) ? (
+                          <span
+                            className={`min-w-[104px] text-right font-mono text-xs font-bold ${
+                              sunkenResult?.status === "ok" ? "text-emerald-500"
+                              : sunkenResult?.status === "fail" ? "text-red-500"
+                              : "text-muted-foreground/50"
+                            }`}
+                            title={sunkenResult?.status !== null
+                              ? `Ballast clearance: ${sunkenResult?.ballastClearance?.toFixed(2)} m.; Loaded clearance: ${sunkenResult?.loadedClearance?.toFixed(2)} m. (acceptable range 3.6–7.6 m.)`
+                              : "Enter Sunken Bitts height, Ballast Draft and Loaded Draft"}
+                          >
+                            {sunkenResult?.status === "ok" ? "Acceptable" : sunkenResult?.status === "fail" ? "Unacceptable" : "—"}
+                          </span>
+                        ) : <span />}
                       </div>
-                      {showTerminalFields && (
+                      {/*{showTerminalFields && (
                         <div className="mt-1.5 pl-[calc(180px+1rem)]">
                           <input type="text" value={item.terminalNote} onChange={e => updateItem(item.id, "terminalNote", e.target.value)}
                             placeholder="Terminal note…"
@@ -4568,7 +4628,7 @@ setPage("study");
                         <div className="mt-1 pl-[calc(180px+1rem)]">
                           <p className="text-[10px] text-sky-400/80 bg-sky-500/5 rounded px-2 py-0.5 inline-block">{item.terminalNote}</p>
                         </div>
-                      )}
+                      )}*/}
                     </div>
                   );
                 })}
