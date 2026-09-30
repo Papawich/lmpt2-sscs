@@ -154,6 +154,7 @@ async function send(
   fromName = "LMPT2 SSCS System",
   includeWorkflowCc = false,
   approvalSummaryHtml = "",
+  attachments?: { confirmationListBase64?: string; checklistBase64?: string; confirmationListFilename?: string; checklistFilename?: string },
 ): Promise<void> {
   const recipientEmail = normalizeRecipients(toEmail);
   if (!recipientEmail) {
@@ -185,6 +186,10 @@ async function send(
         event_time: formatEventTime(),                          // → Event time in ICT
         preheader: `${visual.statusLabel}: ${subject}`,          // → Inbox preview text
         approval_summary_html: approvalSummaryHtml,              // → Approval-only HTML summary block
+        confirmation_list_pdf: attachments?.confirmationListBase64 ?? "",
+        compatibility_checklist_pdf: attachments?.checklistBase64 ?? "",
+        confirmation_list_filename: attachments?.confirmationListFilename ?? "Confirmation List.pdf",
+        compatibility_checklist_filename: attachments?.checklistFilename ?? "Ship Shore Compatibility Checklist.pdf",
       },
       PUBLIC_KEY!,
     );
@@ -294,14 +299,30 @@ export async function notifyShipOfficerStudyApproved(opts: {
   approvedByName: string;
   shipEmail: string;
   approvalSummaryHtml?: string;
+  confirmationListBase64?: string;
+  checklistBase64?: string;
+  confirmationListFilename?: string;
+  checklistFilename?: string;
 }) {
   await send(
     opts.shipEmail,
     `SSCS Study Approved — ${opts.vesselName}`,
-    `Your SSCS compatibility study has been approved.\n\nVessel      : ${opts.vesselName}\nApproved by : ${opts.approvedByName}\n\nThe study is now locked and on record.`,
+    `Your SSCS compatibility study for ${opts.vesselName} has been approved by ${opts.approvedByName}.
+
+The approved documents are now available in the SSCS system:
+• Confirmation List Between Ship & Shore
+• Ship Shore Compatibility Checklist
+
+Please sign in to the SSCS system to view or download the approved documents.`,
     "LMPT2 SSCS System",
     true,
     opts.approvalSummaryHtml ?? "",
+    {
+      confirmationListBase64: opts.confirmationListBase64,
+      checklistBase64: opts.checklistBase64,
+      confirmationListFilename: opts.confirmationListFilename,
+      checklistFilename: opts.checklistFilename,
+    },
   );
 }
 

@@ -671,6 +671,29 @@ export async function uploadStudyDocument(opts: {
   };
 }
 
+
+export async function uploadGeneratedStudyDocument(opts: {
+  studyId: string;
+  docKey: string;
+  fileName: string;
+  bytes: Uint8Array;
+  mimeType: string;
+  userId: string;
+}): Promise<CloudUploadedFile> {
+  const file = new File(
+    [opts.bytes],
+    opts.fileName,
+    { type: opts.mimeType }
+  );
+
+  return uploadStudyDocument({
+    studyId: opts.studyId,
+    docKey: opts.docKey,
+    file,
+    userId: opts.userId,
+  });
+}
+
 export async function replaceSisterSharedDocument(opts: {
   vesselId: number;
   docKey: string;
@@ -684,7 +707,47 @@ export async function replaceSisterSharedDocument(opts: {
   });
   if (error) throw error;
 }
+export interface ApprovalDocument {
+  id: string;
+  studyId: string;
+  documentType: string;
+  fileName: string;
+  storagePath: string;
+  mimeType?: string;
+  fileSize?: number;
+  createdAt?: string;
+}
 
+export async function fetchApprovalDocuments(
+  studyId: string
+): Promise<ApprovalDocument[]> {
+  const client = requireSupabase();
+
+  const { data, error } = await client
+    .from("documents")
+    .select(
+      "id, study_id, document_type, file_name, storage_path, mime_type, file_size, created_at"
+    )
+    .eq("study_id", studyId)
+    .in("document_type", [
+      "approval_confirmation_list",
+      "approval_compatibility_checklist",
+    ])
+    .order("created_at", { ascending: false });
+
+  if (error) throw error;
+
+  return (data ?? []).map((row: any) => ({
+    id: row.id,
+    studyId: row.study_id,
+    documentType: row.document_type,
+    fileName: row.file_name,
+    storagePath: row.storage_path,
+    mimeType: row.mime_type,
+    fileSize: row.file_size,
+    createdAt: row.created_at,
+  }));
+}
 export async function getStudyDocumentUrl(storagePath: string) {
   const client = requireSupabase();
   const { data, error } = await client.storage.from("sscs-documents").createSignedUrl(storagePath, 60);

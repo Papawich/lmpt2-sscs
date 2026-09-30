@@ -53,10 +53,13 @@ import {
   saveStudy as saveCloudStudy,
   markStudyFeedbackCorrected,
   uploadStudyDocument,
+  uploadGeneratedStudyDocument,
   getStudyDocumentUrl,
+  fetchApprovalDocuments,
   deleteStudyDocument,
 } from "./backendService";
 import type { CloudPasswordResetRequest, CloudVesselAccess } from "./backendService";
+import { generateApprovalDocuments } from "./approvalDocumentService";
 import {
   FenderFlatBodySection,
   defaultFlatBodyData, defaultFenderReactionData, defaultBerthingEnergyData, isFenderFlatBodyComplete,
@@ -1039,6 +1042,11 @@ export default function App() {
   const studySaveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
   const [activeStudy, setActiveStudy] = useState<SSCSStudy | null>(null);
+  const [approvalDocuments, setApprovalDocuments] = useState<
+  Awaited<ReturnType<typeof fetchApprovalDocuments>>
+>([]);
+  const [approvalDocumentBusy, setApprovalDocumentBusy] =
+  useState<string | null>(null);
   const [studyTab, setStudyTab]       = useState<string>(CHECKLIST_TEMPLATE[0].section);
   const [generalInfoSubTab, setGeneralInfoSubTab] = useState<string>("Ship Info");
   const [shipNameEditing, setShipNameEditing] = useState(false);
@@ -1778,7 +1786,47 @@ export default function App() {
     if (file.dataUrl) return file.dataUrl;
     throw new Error("Document source is unavailable.");
   }
+async function loadApprovalDocuments(studyId: string) {
+  if (!supabaseConfigured) {
+    setApprovalDocuments([]);
+    return;
+  }
 
+  try {
+    const docs = await fetchApprovalDocuments(studyId);
+    setApprovalDocuments(docs);
+  } catch (err) {
+    console.error("[Approval documents load failed]", err);
+    setApprovalDocuments([]);
+  }
+}
+
+async function downloadApprovalDocument(doc: {
+  id: string;
+  fileName: string;
+  storagePath: string;
+}) {
+  try {
+    setApprovalDocumentBusy(doc.id);
+
+    const signedUrl = await getStudyDocumentUrl(doc.storagePath);
+
+    const link = document.createElement("a");
+    link.href = signedUrl;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.download = doc.fileName;
+
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } catch (err) {
+    console.error("[Approval document download failed]", err);
+    showToast("Unable to open the approval document.", "error");
+  } finally {
+    setApprovalDocumentBusy(null);
+  }
+}
   function openStudy(study: SSCSStudy) {
     if (!canViewStudy(study.vesselId)) {
       showToast("Access required — claim or request vessel access to view this SSCS study.", "error");
@@ -1789,6 +1837,11 @@ export default function App() {
     setShipNameEditing(false);
     setShipNameDraft("");
     setPage("study");
+if (study.status === "approved") {
+  void loadApprovalDocuments(study.id);
+} else {
+  setApprovalDocuments([]);
+}
   }
 
   async function handleRenameVessel() {
@@ -2410,37 +2463,139 @@ export default function App() {
     }
   }
 
-  function approveStudy() {
-    if (!activeStudy || !currentUser) return;
-    const approvedStudy = clearTerminalOfficerAssignment({
-      ...activeStudy,
-      status: "approved",
-      editRequestedById: undefined,
-      editRequestedByName: undefined,
-      editRequestedAt: undefined,
-      reviewedById: currentUser.id,
-      reviewedByName: currentUser.name,
-      approvedAt: new Date().toISOString(),
-      feedbackData: activeStudy.feedbackData && activeStudy.feedbackData.status !== "none"
+  async function approveStudy() {
+  if (!activeStudy || !currentUser) return;
+
+  const approvedAt = new Date().toISOString();
+
+  // Build the immutable approval snapshot in memory first.
+  // Do NOT save it as Approved yet, otherwise Storage RLS will
+  // reject the approval-document upload after the study is locked.
+  const approvedStudy = clearTerminalOfficerAssignment({
+    ...activeStudy,
+    status: "approved",
+    editRequestedById: undefined,
+    editRequestedByName: undefined,
+    editRequestedAt: undefined,
+    reviewedById: currentUser.id,
+    reviewedByName: currentUser.name,
+    approvedAt,
+    feedbackData:
+      activeStudy.feedbackData && activeStudy.feedbackData.status !== "none"
         ? { ...activeStudy.feedbackData, status: "closed" }
         : (activeStudy.feedbackData ?? defaultTerminalFeedbackData()),
-    });
-    syncStudy(approvedStudy, true);
-    showToast("Study approved and locked.", "success");
-    const shipUser = users.find(u => u.id === (activeStudy.submittedById ?? activeStudy.initiatedById));
-    const vessel = vessels.find(v => v.id === approvedStudy.vesselId);
+  });
+
+  const vessel = vessels.find(v => v.id === approvedStudy.vesselId);
+  const shipUser = users.find(
+    u => u.id === (activeStudy.submittedById ?? activeStudy.initiatedById)
+  );
+
+  try {
+  let generated:
+    | Awaited<ReturnType<typeof generateApprovalDocuments>>
+    | undefined;
+
+  // 1. Generate Excel approval documents from the approval snapshot
+  //    while the DB study is still Submitted / editable for document upload.
+  if (vessel) {
+  // Prepare approval snapshot.
+  // Mooring Pattern is stored in a private Supabase bucket,
+  // so generate a temporary signed URL for Excel image embedding.
+  let approvalStudySnapshot = approvedStudy;
+
+  const patternImage =
+    approvedStudy.mooringArrangementData?.patternImage;
+
+  if (
+    supabaseConfigured &&
+    patternImage?.storagePath
+  ) {
+    const signedUrl = await getStudyDocumentUrl(
+      patternImage.storagePath
+    );
+
+    approvalStudySnapshot = {
+      ...approvedStudy,
+      mooringArrangementData: {
+        ...approvedStudy.mooringArrangementData,
+        patternImage: {
+          ...patternImage,
+          signedUrl,
+        },
+      },
+    };
+  }
+
+  generated = await generateApprovalDocuments(
+    vessel,
+    approvalStudySnapshot,
+    currentUser.name,
+    approvedAt
+  );
+
+    // 2. Upload approval Excel files BEFORE locking the study.
+    if (supabaseConfigured) {
+      await Promise.all([
+        uploadGeneratedStudyDocument({
+          studyId: approvedStudy.id,
+          docKey: "approval_confirmation_list",
+          fileName: generated.confirmationList.fileName,
+          bytes: generated.confirmationList.bytes,
+          mimeType: generated.confirmationList.mimeType,
+          userId: currentUser.id,
+        }),
+
+        uploadGeneratedStudyDocument({
+          studyId: approvedStudy.id,
+          docKey: "approval_compatibility_checklist",
+          fileName: generated.compatibilityChecklist.fileName,
+          bytes: generated.compatibilityChecklist.bytes,
+          mimeType: generated.compatibilityChecklist.mimeType,
+          userId: currentUser.id,
+        }),
+      ]);
+    }
+  }
+
+    // 3. PDFs are safely stored. Now persist Approved status and lock.
+    if (supabaseConfigured) {
+      await saveCloudStudy(approvedStudy, currentUser.id);
+    }
+
+    // 4. Update local state only after approval is successfully persisted.
+    setActiveStudy(approvedStudy);
+    setStudies(prev =>
+      prev.map(s => (s.id === approvedStudy.id ? approvedStudy : s))
+    );
+        await loadApprovalDocuments(approvedStudy.id);
+    // 5. Send approval email with the generated PDFs.
     if (shipUser) {
       const approvalSummaryHtml = vessel
         ? buildApprovalEmailDraft(vessel, approvedStudy).approvalSummaryHtml
         : undefined;
-      void notifyShipOfficerStudyApproved({
-        vesselName: approvedStudy.vesselName,
-        approvedByName: currentUser.name,
-        shipEmail: shipUser.email,
-        approvalSummaryHtml,
-      }).catch(err => console.error("[Study approved email failed]", err));
+
+      await notifyShipOfficerStudyApproved({
+  vesselName: approvedStudy.vesselName,
+  approvedByName: currentUser.name,
+  shipEmail: shipUser.email,
+  approvalSummaryHtml,
+});
     }
+
+    showToast(
+  "Study approved. Approval PDFs generated and stored successfully.",
+  "success"
+);
+  } catch (err) {
+    console.error("[Study approval document/email failed]", err);
+
+    showToast(
+      "Approval failed before completion. Check console for details.",
+      "error"
+    );
   }
+}
 
 
   function requestEdit() {
@@ -4160,7 +4315,84 @@ setPage("study");
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <p className={`font-mono text-[10px] uppercase tracking-widest font-bold ${feedbackCorrected ? "text-emerald-500" : "text-violet-500"}`}>
-                      {feedbackCorrected ? "Corrections Completed — Awaiting Terminal Review" : "Terminal Officer Feedback"}
+                      {/* Approval Documents */}
+{st === "approved" && (
+  <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4 mb-4">
+    <div className="flex items-start justify-between gap-4 mb-4">
+      <div>
+        <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-emerald-400">
+          Approval Documents
+        </p>
+
+        <p className="text-xs text-muted-foreground mt-1">
+          Approved by{" "}
+          <span className="text-foreground font-medium">
+            {activeStudy.reviewedByName ?? "—"}
+          </span>
+          {activeStudy.approvedAt
+            ? ` · ${fmtDate(activeStudy.approvedAt)}`
+            : ""}
+        </p>
+      </div>
+
+      <BadgeCheck className="w-5 h-5 text-emerald-400 shrink-0" />
+    </div>
+
+    {approvalDocuments.length === 0 ? (
+      <p className="text-xs text-muted-foreground">
+        No generated approval documents are available for this approval.
+      </p>
+    ) : (
+      <div className="space-y-2">
+        {[
+          {
+            type: "approval_confirmation_list",
+            label: "Confirmation List Between Ship & Shore",
+          },
+          {
+            type: "approval_compatibility_checklist",
+            label: "Ship Shore Compatibility Checklist",
+          },
+        ].map(item => {
+          const doc = approvalDocuments.find(
+            d => d.documentType === item.type
+          );
+
+          return (
+            <div
+              key={item.type}
+              className="flex items-center justify-between gap-3 rounded-md border border-border bg-background/50 px-3 py-3"
+            >
+              <div className="min-w-0">
+                <p className="text-xs font-semibold text-foreground">
+                  {item.label}
+                </p>
+
+                <p className="font-mono text-[9px] text-muted-foreground truncate mt-0.5">
+                  {doc?.fileName ?? "Document not available"}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                disabled={!doc || approvalDocumentBusy === doc.id}
+                onClick={() =>
+                  doc && void downloadApprovalDocument(doc)
+                }
+                className="shrink-0 rounded border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 font-mono text-[10px] font-bold uppercase tracking-wide text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {doc && approvalDocumentBusy === doc.id
+                  ? "Opening..."
+                  : "Download Excel"}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    )}
+  </div>
+)}
+{feedbackCorrected ? "Corrections Completed — Awaiting Terminal Review" : "Terminal Officer Feedback"}
                     </p>
                     {activeStudy.feedbackData.sentByName && (
                       <span className="font-mono text-[10px] text-muted-foreground">feedback by {activeStudy.feedbackData.sentByName}</span>
@@ -4307,7 +4539,78 @@ setPage("study");
             {isShip && st === "edit_requested" && uid === activeStudy.editRequestedById && <p className="text-xs font-mono text-amber-400">Edit request pending approval.</p>}
             {role === "viewer" && <p className="text-xs font-mono text-muted-foreground">You have read-only access to this study.</p>}
           </div>
+{/* Approval Documents */}
+{st === "approved" && (
+  <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-5 mb-6">
+    <div className="flex items-start justify-between gap-4 mb-4">
+      <div>
+        <p className="font-mono text-xs font-bold uppercase tracking-widest text-emerald-500">
+          Approval Documents
+        </p>
 
+        <p className="text-xs text-muted-foreground mt-1">
+          Approved by{" "}
+          <span className="text-foreground font-medium">
+            {activeStudy.reviewedByName ?? "—"}
+          </span>
+
+          {activeStudy.approvedAt
+            ? ` · ${fmtDate(activeStudy.approvedAt)}`
+            : ""}
+        </p>
+      </div>
+
+      <BadgeCheck className="w-5 h-5 text-emerald-500" />
+    </div>
+
+    <div className="space-y-2">
+      {[
+        {
+          type: "approval_confirmation_list",
+          label: "Confirmation List Between Ship & Shore",
+        },
+        {
+          type: "approval_compatibility_checklist",
+          label: "Ship Shore Compatibility Checklist",
+        },
+      ].map(item => {
+        const doc = approvalDocuments.find(
+          d => d.documentType === item.type
+        );
+
+        return (
+          <div
+            key={item.type}
+            className="flex items-center justify-between gap-4 rounded-md border border-border bg-background px-4 py-3"
+          >
+            <div>
+              <p className="text-sm font-semibold text-foreground">
+                {item.label}
+              </p>
+
+              <p className="font-mono text-[10px] text-muted-foreground mt-1">
+                {doc?.fileName ?? "Document not available"}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              disabled={!doc || approvalDocumentBusy === doc.id}
+              onClick={() =>
+                doc && void downloadApprovalDocument(doc)
+              }
+              className="shrink-0 rounded border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 font-mono text-[10px] font-bold uppercase tracking-wide text-emerald-500 hover:bg-emerald-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {doc && approvalDocumentBusy === doc.id
+                ? "Opening..."
+                : "Download Excel"}
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  </div>
+)}
           {feedbackDialogOpen && isTerminal && st === "submitted" && (
             <div className="fixed inset-0 z-[1000] bg-black/55 flex items-center justify-center p-4">
               <div className="w-full max-w-2xl max-h-[88vh] overflow-hidden rounded-lg border border-border bg-card shadow-2xl">
