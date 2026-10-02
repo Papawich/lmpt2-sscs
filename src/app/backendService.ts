@@ -279,6 +279,35 @@ export async function updatePassword(password: string) {
  * browser. An administrator must approve the request before the requester can
  * set a new password.
  */
+export async function sendAppNotificationEmail(opts: {
+  toEmail: string | string[];
+  subject: string;
+  message: string;
+  fromName?: string;
+}) {
+  const client = requireSupabase();
+  const recipients = Array.from(
+    new Set(
+      (Array.isArray(opts.toEmail) ? opts.toEmail : String(opts.toEmail).split(/[;,]/))
+        .map((email) => String(email).trim())
+        .filter(Boolean),
+    ),
+  ).join(",");
+  if (!recipients) return;
+
+  const { data, error } = await client.functions.invoke("send-email", {
+    body: {
+      toEmail: recipients,
+      subject: opts.subject,
+      message: opts.message,
+      fromName: opts.fromName || "SSCS LMPT2",
+      appUrl: ((import.meta.env.VITE_APP_URL as string | undefined)?.trim() || "https://sscs.marine-lmpt2.com"),
+    },
+  });
+  if (error) throw error;
+  if (!data?.ok) throw new Error(data?.message || "Unable to send notification email.");
+}
+
 export async function requestPasswordResetNoEmail(email: string) {
   const client = requireSupabase();
   const { data, error } = await client.functions.invoke("password-reset", {

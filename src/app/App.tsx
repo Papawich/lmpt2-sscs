@@ -34,6 +34,7 @@ import {
   signUp as cloudSignUp,
   signOut as cloudSignOut,
   requestPasswordResetNoEmail,
+  sendAppNotificationEmail,
   checkPasswordResetStatus,
   completePasswordReset,
   fetchPasswordResetRequests,
@@ -1477,6 +1478,23 @@ export default function App() {
         email: forgotEmail.trim(),
       }));
       setForgotStep("pending");
+
+      // The reset request is already safely stored at this point. Email is
+      // best-effort only, so a notification failure must never cancel it.
+      void sendAppNotificationEmail({
+        toEmail: adminNotificationEmails,
+        subject: `Password Reset Request — ${forgotEmail.trim()}`,
+        message: [
+          "A user has requested a password reset and is waiting for administrator review.",
+          "",
+          `User email: ${forgotEmail.trim()}`,
+          `Requested at: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Bangkok" })} ICT`,
+          "",
+          "Open SSCS and review the request in Password Reset Requests.",
+        ].join("\n"),
+      }).catch((emailErr) => {
+        console.error("[Password reset admin notification failed]", emailErr);
+      });
     } catch (err) {
       console.error("[Password reset request failed]", err);
       setForgotErr(err instanceof Error ? err.message : "Unable to create password reset request.");
@@ -1584,6 +1602,26 @@ export default function App() {
       const updated = await updatePasswordResetRequestStatus(request.id, status);
       setPasswordResetRequests(prev => prev.map(x => x.id === updated.id ? updated : x));
       showToast(`Password reset ${status} for ${request.email}.`, status === "approved" ? "success" : "info");
+
+      // Status has already been committed to the database. Notify the user
+      // without rolling back the administrator decision if email delivery fails.
+      void sendAppNotificationEmail({
+        toEmail: request.email,
+        subject: status === "approved" ? "Password Reset Request Approved" : "Password Reset Request Rejected",
+        message: status === "approved"
+          ? [
+              "Your SSCS password reset request has been approved by an administrator.",
+              "",
+              "Return to the SSCS password reset screen and continue with your existing request to set a new password.",
+            ].join("\n")
+          : [
+              "Your SSCS password reset request has been rejected by an administrator.",
+              "",
+              "If you still need assistance, please contact the SSCS administrator.",
+            ].join("\n"),
+      }).catch((emailErr) => {
+        console.error("[Password reset user notification failed]", emailErr);
+      });
     } catch (err) {
       console.error("[Password reset decision failed]", err);
       showToast(err instanceof Error ? err.message : "Unable to update password reset request.", "error");
