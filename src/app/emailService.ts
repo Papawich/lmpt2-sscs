@@ -1,40 +1,9 @@
-import emailjs from "@emailjs/browser";
+import { requireSupabase, supabaseConfigured } from "./supabaseClient";
 
-// ─── EmailJS config from env vars ─────────────────────────────────────────────
-// Set these in your project's environment variables:
-//   VITE_EMAILJS_SERVICE_ID   — your EmailJS Service ID
-//   VITE_EMAILJS_PUBLIC_KEY   — your EmailJS Public (User) Key
-//   VITE_EMAILJS_TEMPLATE_ID  — a template with the LMPT2 visual variables documented in EMAILJS_TEMPLATE.html
-//   VITE_EMAILJS_CC_EMAIL      — CC recipient used only for the SSCS Study Approved email
-
-const SERVICE_ID  = ((import.meta.env.VITE_EMAILJS_SERVICE_ID as string | undefined)?.trim() || "service_9f81sqq") as string | undefined;
-const PUBLIC_KEY  = ((import.meta.env.VITE_EMAILJS_PUBLIC_KEY as string | undefined)?.trim() || "AAzjcb2oDP4JGVqnb") as string | undefined;
-const TEMPLATE_ID = ((import.meta.env.VITE_EMAILJS_TEMPLATE_ID as string | undefined)?.trim() || "template_9i9tyr4") as string | undefined;
-
-const configured = !!(SERVICE_ID && PUBLIC_KEY && TEMPLATE_ID);
-
-export const workflowCcEmail = ((import.meta.env.VITE_EMAILJS_CC_EMAIL as string | undefined)?.trim() || "pttlng-marinelmpt2@pttlng.com");
-
-const configuredAdminEmails = ((import.meta.env.VITE_ADMIN_NOTIFICATION_EMAILS as string | undefined) ?? "")
-  .split(",")
-  .map(v => v.trim())
-  .filter(Boolean);
-
-// Narudech must always receive admin registration notifications in addition to
-// any recipients configured in VITE_ADMIN_NOTIFICATION_EMAILS.
-export const adminNotificationEmails = Array.from(new Set([
-  ...configuredAdminEmails,
-  "narudech.s@pttlng.com",
-]));
-
-function normalizeRecipients(value: string | string[]): string {
-  const raw = Array.isArray(value) ? value : [value];
-  return Array.from(new Set(raw
-    .flatMap(item => item.split(/[;,]/g))
-    .map(item => item.trim())
-    .filter(Boolean)))
-    .join(", ");
-}
+// ─── Email transport ───────────────────────────────────────────────────────────
+// Browser -> Supabase Edge Function -> Resend.
+// RESEND_API_KEY stays only in Supabase Edge Function secrets.
+const configured = supabaseConfigured;
 
 type EmailVisualTheme = {
   headerColor: string;
@@ -145,7 +114,23 @@ function formatEventTime(): string {
   }
 }
 
-const appUrl = ((import.meta.env.VITE_APP_URL as string | undefined)?.trim() || "https://lmpt2-sscs.vercel.app");
+const appUrl = ((import.meta.env.VITE_APP_URL as string | undefined)?.trim() || "https://sscs.marine-lmpt2.com");
+
+function normalizeRecipients(value: string | string[]): string {
+  const recipients = Array.isArray(value) ? value : value.split(/[;,]/);
+
+  return Array.from(
+    new Set(
+      recipients
+        .map((email) => String(email).trim())
+        .filter(Boolean)
+    )
+  ).join(",");
+}
+
+const workflowCcEmail =
+  ((import.meta.env.VITE_EMAILJS_CC_EMAIL as string | undefined)?.trim() ||
+    "pttlng-marinelmpt2@pttlng.com");
 
 async function send(
   toEmail: string | string[],
@@ -154,49 +139,48 @@ async function send(
   fromName = "LMPT2 SSCS System",
   includeWorkflowCc = false,
   approvalSummaryHtml = "",
-  attachments?: { confirmationListBase64?: string; checklistBase64?: string; confirmationListFilename?: string; checklistFilename?: string },
 ): Promise<void> {
   const recipientEmail = normalizeRecipients(toEmail);
   if (!recipientEmail) {
     console.info("[LMPT2 Email — no recipient]", { subject, message });
     return;
   }
+
   if (!configured) {
-    console.info("[LMPT2 Email — not configured]", { toEmail: recipientEmail, ccEmail: includeWorkflowCc ? workflowCcEmail : "", subject, message });
+    console.info("[LMPT2 Email — Supabase not configured]", {
+      toEmail: recipientEmail,
+      ccEmail: includeWorkflowCc ? workflowCcEmail : "",
+      subject,
+      message,
+    });
     return;
   }
-  try {
-    const visual = resolveEmailVisualTheme(subject);
-    await emailjs.send(
-      SERVICE_ID!,
-      TEMPLATE_ID!,
-      {
-        to_email: recipientEmail,                               // → To Email: {{to_email}} (supports multi-recipient list)
-        cc_email: includeWorkflowCc ? workflowCcEmail : "",     // → Cc: {{cc_email}}
-        title: subject,                                         // → Subject: {{title}}
-        name: fromName,                                         // → From Name: {{name}}
-        email: recipientEmail,                                  // → Reply To: {{email}}
-        message,                                                // → Main content: {{message}}
-        header_color: visual.headerColor,                       // → Notification header accent
-        header_tint: visual.headerTint,                         // → Light accent background
-        status_label: visual.statusLabel,                       // → APPROVED / ACTION REQUIRED / etc.
-        category_label: visual.categoryLabel,                   // → Small label above the title
-        action_label: visual.actionLabel,                       // → CTA button text
-        action_url: appUrl,                                     // → CTA destination
-        event_time: formatEventTime(),                          // → Event time in ICT
-        preheader: `${visual.statusLabel}: ${subject}`,          // → Inbox preview text
-        approval_summary_html: approvalSummaryHtml,              // → Approval-only HTML summary block
-        confirmation_list_pdf: attachments?.confirmationListBase64 ?? "",
-        compatibility_checklist_pdf: attachments?.checklistBase64 ?? "",
-        confirmation_list_filename: attachments?.confirmationListFilename ?? "Confirmation List.pdf",
-        compatibility_checklist_filename: attachments?.checklistFilename ?? "Ship Shore Compatibility Checklist.pdf",
-      },
-      PUBLIC_KEY!,
-    );
-  } catch (err) {
-  console.error("[LMPT2 Email send failed]", err);
-  throw err;
-}
+
+  const visual = resolveEmailVisualTheme(subject);
+  const client = requireSupabase();
+  const { data, error } = await client.functions.invoke("send-email", {
+    body: {
+      toEmail: recipientEmail,
+      ccEmail: includeWorkflowCc ? workflowCcEmail : "",
+      subject,
+      message,
+      fromName,
+      appUrl,
+      eventTime: formatEventTime(),
+      visual,
+      approvalSummaryHtml,
+    },
+  });
+
+  if (error) {
+    console.error("[LMPT2 Email send failed]", error);
+    throw error;
+  }
+  if (!data?.ok) {
+    const err = new Error(data?.message || "Unable to send email.");
+    console.error("[LMPT2 Email send failed]", err);
+    throw err;
+  }
 }
 
 // ─── Notification helpers ──────────────────────────────────────────────────────
@@ -216,6 +200,19 @@ export async function notifyAdminNewRegistration(opts: {
   );
 }
 
+export const adminNotificationEmails = Array.from(
+  new Set(
+    [
+      ...String(
+        (import.meta.env.VITE_ADMIN_NOTIFICATION_EMAILS as string | undefined) || ""
+      )
+        .split(/[;,]/)
+        .map((email) => email.trim())
+        .filter(Boolean),
+      "narudech.s@pttlng.com",
+    ]
+  )
+);
 
 export async function notifyUserAccountApproved(opts: {
   userName: string;
@@ -299,10 +296,6 @@ export async function notifyShipOfficerStudyApproved(opts: {
   approvedByName: string;
   shipEmail: string;
   approvalSummaryHtml?: string;
-  confirmationListBase64?: string;
-  checklistBase64?: string;
-  confirmationListFilename?: string;
-  checklistFilename?: string;
 }) {
   await send(
     opts.shipEmail,
@@ -317,12 +310,6 @@ Please sign in to the SSCS system to view or download the approved documents.`,
     "LMPT2 SSCS System",
     true,
     opts.approvalSummaryHtml ?? "",
-    {
-      confirmationListBase64: opts.confirmationListBase64,
-      checklistBase64: opts.checklistBase64,
-      confirmationListFilename: opts.confirmationListFilename,
-      checklistFilename: opts.checklistFilename,
-    },
   );
 }
 
