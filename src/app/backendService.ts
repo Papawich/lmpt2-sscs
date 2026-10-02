@@ -279,35 +279,6 @@ export async function updatePassword(password: string) {
  * browser. An administrator must approve the request before the requester can
  * set a new password.
  */
-export async function sendAppNotificationEmail(opts: {
-  toEmail: string | string[];
-  subject: string;
-  message: string;
-  fromName?: string;
-}) {
-  const client = requireSupabase();
-  const recipients = Array.from(
-    new Set(
-      (Array.isArray(opts.toEmail) ? opts.toEmail : String(opts.toEmail).split(/[;,]/))
-        .map((email) => String(email).trim())
-        .filter(Boolean),
-    ),
-  ).join(",");
-  if (!recipients) return;
-
-  const { data, error } = await client.functions.invoke("send-email", {
-    body: {
-      toEmail: recipients,
-      subject: opts.subject,
-      message: opts.message,
-      fromName: opts.fromName || "SSCS LMPT2",
-      appUrl: ((import.meta.env.VITE_APP_URL as string | undefined)?.trim() || "https://sscs.marine-lmpt2.com"),
-    },
-  });
-  if (error) throw error;
-  if (!data?.ok) throw new Error(data?.message || "Unable to send notification email.");
-}
-
 export async function requestPasswordResetNoEmail(email: string) {
   const client = requireSupabase();
   const { data, error } = await client.functions.invoke("password-reset", {
@@ -395,6 +366,24 @@ export async function updateProfileStatus(id: string, status: "approved" | "reje
     .update({ account_status: status, updated_at: new Date().toISOString() })
     .eq("id", id);
   if (error) throw error;
+}
+
+export type ManagedUserRole = "terminal_officer" | "ship_officer" | "viewer";
+
+async function invokeManageUser(body: Record<string, unknown>) {
+  const client = requireSupabase();
+  const { data, error } = await client.functions.invoke("manage-user", { body });
+  if (error) throw error;
+  if (!data?.ok) throw new Error(data?.error || "Unable to manage user account.");
+  return data;
+}
+
+export async function updateProfileRole(id: string, role: ManagedUserRole) {
+  await invokeManageUser({ action: "change-role", userId: id, role });
+}
+
+export async function deleteUserAccount(id: string) {
+  await invokeManageUser({ action: "delete-user", userId: id });
 }
 
 export async function fetchVesselAccesses(): Promise<CloudVesselAccess[]> {

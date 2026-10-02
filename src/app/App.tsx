@@ -5,7 +5,7 @@ import {
   Gauge, BarChart2, RefreshCw, Building2, ShieldCheck, ShieldX,
   Clock, Users, CheckCheck, XCircle, KeyRound, Send, Info,
   FileText, AlertTriangle, Edit3, ClipboardList, BadgeCheck,
-  RotateCcw, Pencil, FilePlus, Plus, ZoomIn,
+  RotateCcw, Pencil, FilePlus, Plus, ZoomIn, Trash2,
 } from "lucide-react";
 import heroBg from "../imports/image-8.png";
 import {
@@ -34,7 +34,6 @@ import {
   signUp as cloudSignUp,
   signOut as cloudSignOut,
   requestPasswordResetNoEmail,
-  sendAppNotificationEmail,
   checkPasswordResetStatus,
   completePasswordReset,
   fetchPasswordResetRequests,
@@ -42,6 +41,8 @@ import {
   fetchMyProfile,
   fetchProfiles,
   updateProfileStatus,
+  updateProfileRole,
+  deleteUserAccount,
   fetchVesselAccesses,
   requestVesselAccess,
   reviewVesselAccess,
@@ -1432,6 +1433,41 @@ export default function App() {
     }
   }
 
+  async function handleAccountRoleChange(user: UserAccount, role: Role) {
+    if (user.role === role) return;
+    try {
+      if (supabaseConfigured) await updateProfileRole(user.id, role);
+      setUsers(prev => prev.map(x => x.id === user.id ? { ...x, role } : x));
+      showToast(`${user.name} role changed to ${ROLE_META[role].label}.`, "success");
+    } catch (err) {
+      console.error("[Account role update failed]", err);
+      showToast(err instanceof Error ? err.message : "Unable to update user role.", "error");
+    }
+  }
+
+  function requestDeleteUser(user: UserAccount) {
+    askConfirmation(
+      "Delete User Account",
+      `Delete ${user.name} (${user.email})? This permanently removes the Supabase Auth account and profile. This action cannot be undone.`,
+      () => handleDeleteUser(user),
+    );
+  }
+
+  async function handleDeleteUser(user: UserAccount) {
+    try {
+      if (user.id === currentUser?.id) {
+        showToast("You cannot delete your own administrator account.", "error");
+        return;
+      }
+      if (supabaseConfigured) await deleteUserAccount(user.id);
+      setUsers(prev => prev.filter(x => x.id !== user.id));
+      showToast(`${user.name} deleted.`, "success");
+    } catch (err) {
+      console.error("[Delete user failed]", err);
+      showToast(err instanceof Error ? err.message : "Unable to delete user account.", "error");
+    }
+  }
+
   async function handleAccountStatusChange(user: UserAccount, status: "approved" | "rejected") {
     try {
       if (supabaseConfigured) await updateProfileStatus(user.id, status);
@@ -1478,23 +1514,6 @@ export default function App() {
         email: forgotEmail.trim(),
       }));
       setForgotStep("pending");
-
-      // The reset request is already safely stored at this point. Email is
-      // best-effort only, so a notification failure must never cancel it.
-      void sendAppNotificationEmail({
-        toEmail: adminNotificationEmails,
-        subject: `Password Reset Request — ${forgotEmail.trim()}`,
-        message: [
-          "A user has requested a password reset and is waiting for administrator review.",
-          "",
-          `User email: ${forgotEmail.trim()}`,
-          `Requested at: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Bangkok" })} ICT`,
-          "",
-          "Open SSCS and review the request in Password Reset Requests.",
-        ].join("\n"),
-      }).catch((emailErr) => {
-        console.error("[Password reset admin notification failed]", emailErr);
-      });
     } catch (err) {
       console.error("[Password reset request failed]", err);
       setForgotErr(err instanceof Error ? err.message : "Unable to create password reset request.");
@@ -1602,26 +1621,6 @@ export default function App() {
       const updated = await updatePasswordResetRequestStatus(request.id, status);
       setPasswordResetRequests(prev => prev.map(x => x.id === updated.id ? updated : x));
       showToast(`Password reset ${status} for ${request.email}.`, status === "approved" ? "success" : "info");
-
-      // Status has already been committed to the database. Notify the user
-      // without rolling back the administrator decision if email delivery fails.
-      void sendAppNotificationEmail({
-        toEmail: request.email,
-        subject: status === "approved" ? "Password Reset Request Approved" : "Password Reset Request Rejected",
-        message: status === "approved"
-          ? [
-              "Your SSCS password reset request has been approved by an administrator.",
-              "",
-              "Return to the SSCS password reset screen and continue with your existing request to set a new password.",
-            ].join("\n")
-          : [
-              "Your SSCS password reset request has been rejected by an administrator.",
-              "",
-              "If you still need assistance, please contact the SSCS administrator.",
-            ].join("\n"),
-      }).catch((emailErr) => {
-        console.error("[Password reset user notification failed]", emailErr);
-      });
     } catch (err) {
       console.error("[Password reset decision failed]", err);
       showToast(err instanceof Error ? err.message : "Unable to update password reset request.", "error");
@@ -3108,11 +3107,23 @@ setPage("study");
                   <div key={u.id} className={`grid grid-cols-[1fr_auto_auto_auto_auto] gap-4 px-5 py-4 items-center ${i < tabUsers.length - 1 ? "border-b border-border/50" : ""}`}>
                     <div><p className="text-sm text-foreground font-medium truncate">{u.name}</p><p className="font-mono text-[10px] text-muted-foreground">{u.email}</p></div>
                     <p className="hidden md:block text-xs text-muted-foreground">{u.company}</p>
-                    <div className="hidden sm:block">{u.role ? <span className={`px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase tracking-wider border ${ROLE_META[u.role].color}`}>{ROLE_META[u.role].label}</span> : "—"}</div>
+                    <div className="hidden sm:block">
+                      <select
+                        value={u.role ?? "viewer"}
+                        onChange={e => void handleAccountRoleChange(u, e.target.value as Role)}
+                        className="rounded border border-border bg-background px-2 py-1.5 text-[11px] font-mono text-foreground"
+                        aria-label={`Role for ${u.name}`}
+                      >
+                        <option value="terminal_officer">Terminal Officer</option>
+                        <option value="ship_officer">Ship Officer</option>
+                        <option value="viewer">Viewer</option>
+                      </select>
+                    </div>
                     <AcctBadge status={u.status} />
                     <div className="flex items-center gap-2">
                       {u.status !== "approved" && <button onClick={() => void handleAccountStatusChange(u, "approved")} className="flex items-center gap-1 px-2.5 py-1.5 rounded text-[11px] font-mono font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors"><ShieldCheck className="w-3 h-3" />Approve</button>}
                       {u.status !== "rejected" && <button onClick={() => void handleAccountStatusChange(u, "rejected")} className="flex items-center gap-1 px-2.5 py-1.5 rounded text-[11px] font-mono font-semibold bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors"><ShieldX className="w-3 h-3" />Reject</button>}
+                      <button onClick={() => requestDeleteUser(u)} className="flex items-center gap-1 px-2.5 py-1.5 rounded text-[11px] font-mono font-semibold bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors" title="Delete user"><Trash2 className="w-3 h-3" />Delete</button>
                     </div>
                   </div>
                 ))}
