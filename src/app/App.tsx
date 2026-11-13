@@ -3285,7 +3285,7 @@ setPage("study");
                       </button>
                       <span className="hidden md:block font-mono text-xs text-muted-foreground whitespace-nowrap">{mainVessel.type}</span>
                       <span className="hidden sm:block font-mono text-xs text-foreground whitespace-nowrap">{mainVessel.capacity}</span>
-                      <span className="hidden lg:block text-xs text-muted-foreground whitespace-nowrap">{mainVessel.flag} · {mainVessel.year}</span>
+                      <span className="hidden lg:block text-xs text-muted-foreground whitespace-nowrap">{mainVessel.flag} · {mainVessel.year > 0 ? mainVessel.year : "—"}</span>
                       <VesselBadge status={v.status} />
                       <button
                         title="SSCS Summary"
