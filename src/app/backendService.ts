@@ -503,24 +503,25 @@ export async function fetchApprovedSisterReferenceVesselIds(): Promise<number[]>
   return (data ?? []).map((row: any) => Number(row.vessel_id));
 }
 
+
 export async function fetchStudies(defaults: Record<string, () => any>): Promise<AnyStudy[]> {
-   const client = requireSupabase();
-  const [{ data: studyRows, error: studyError }, { data: sectionRows, error: sectionError }] = await Promise.all([
-    client.from("sscs_studies").select("*").order("initiated_at", { ascending: false }),
-    client.from("study_sections").select("study_id, section_key, data"),
-  ]);
+  const client = requireSupabase();
+
   const { data: studyRows, error: studyError } = await client
     .from("sscs_studies")
     .select("*")
     .order("initiated_at", { ascending: false });
-   if (studyError) throw studyError;
-  if (sectionError) throw sectionError;
 
-  // Supabase Data API often limits a single response to 1,000 rows.
-  // Fetch all technical sections with stable ordering to prevent silently
-  // rendering default/empty sections when the project grows beyond that limit.
+  if (studyError) throw studyError;
+
+  // Load all study sections in pages to avoid the 1,000-row limit.
   const PAGE_SIZE = 500;
-  const sectionRows: Array<{ study_id: string; section_key: string; data: any }> = [];
+  const sectionRows: Array<{
+    study_id: string;
+    section_key: string;
+    data: any;
+  }> = [];
+
   for (let offset = 0; ; offset += PAGE_SIZE) {
     const { data: page, error: sectionError } = await client
       .from("study_sections")
@@ -528,13 +529,19 @@ export async function fetchStudies(defaults: Record<string, () => any>): Promise
       .order("study_id", { ascending: true })
       .order("section_key", { ascending: true })
       .range(offset, offset + PAGE_SIZE - 1);
+
     if (sectionError) throw sectionError;
+
     sectionRows.push(...(page ?? []));
+
     if ((page?.length ?? 0) < PAGE_SIZE) break;
   }
-  console.info(`[SSCS] Loaded ${studyRows?.length ?? 0} studies and ${sectionRows.length} study sections`);
- 
-   const sectionsByStudy = new Map<string, Record<string, any>>();
+
+  console.info(
+    `[SSCS] Loaded ${studyRows?.length ?? 0} studies and ${sectionRows.length} study sections`
+  );
+
+  const sectionsByStudy = new Map<string, Record<string, any>>();
    for (const row of sectionRows ?? []) {
 
     const current = sectionsByStudy.get(row.study_id) ?? {};
