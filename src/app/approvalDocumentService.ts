@@ -185,19 +185,9 @@ async function buildConfirmation(vessel: AnyRecord, study: AnyRecord): Promise<A
     set(p2, `AM${24 + i}`, row?.reactionForce);
   });
 
-  const displacement = Number.parseFloat(clean(berthingEnergy.displacement).replace(/,/g, ""));
-  if (Number.isFinite(displacement) && displacement > 0) {
-    const BE_VELOCITY = 0.10;
-    const BE_CM = 1.75;
-    const BE_CE = 0.74;
-    const BE_CC = 1.00;
-    const BE_CS = 1.00;
-    const BE_SAFETY_FACTOR = 2;
-    const energy =
-      0.5 * (displacement * 1000 / 9.81) * BE_VELOCITY ** 2 *
-      BE_CM * BE_CE * BE_CC * BE_CS / 1000 * BE_SAFETY_FACTOR;
-    set(p2, "AS46", energy.toFixed(2));
-  }
+// Berthing Energy is calculated by the Excel template.
+// Do not overwrite AS46, which contains the Excel formula.
+// Displacement is linked from General Information on page 1.
 
   const mooring = study.mooringArrangementData ?? {};
   const mr = mooring.mooringRope ?? {};
