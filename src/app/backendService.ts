@@ -122,7 +122,7 @@ function vesselFromRow(row: any): AnyVessel {
     callSign: row.call_sign ?? "—",
     flag: row.flag ?? "—",
     portOfRegistry: row.port_of_registry ?? "—",
-    year: Number(row.year_built ?? new Date().getFullYear()),
+    year: row.year_built == null ? 0 : Number(row.year_built),
     type: row.vessel_type ?? "LNG Carrier",
     capacity: row.capacity ?? "—",
     owner: row.owner ?? "—",
