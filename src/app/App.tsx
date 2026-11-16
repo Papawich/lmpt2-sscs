@@ -5,7 +5,7 @@ import {
   Gauge, BarChart2, RefreshCw, Building2, ShieldCheck, ShieldX,
   Clock, Users, CheckCheck, XCircle, KeyRound, Send, Info,
   FileText, AlertTriangle, Edit3, ClipboardList, BadgeCheck,
-  RotateCcw, Pencil, FilePlus, Plus, ZoomIn, Trash2, Upload,
+  RotateCcw, Pencil, FilePlus, Plus, ZoomIn, Trash2, Upload, Download,
 } from "lucide-react";
 import heroBg from "../imports/image-8.png";
 import {
