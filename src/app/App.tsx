@@ -1049,6 +1049,14 @@ export default function App() {
 >([]);
   const [approvalDocumentBusy, setApprovalDocumentBusy] =
   useState<string | null>(null);
+  // Manual approval-notification draft. Opening this dialog never sends email.
+  const [approvalEmailDraft, setApprovalEmailDraft] = useState<{
+    vessel: Vessel; study: SSCSStudy;
+  } | null>(null);
+  const [approvalEmailTo, setApprovalEmailTo] = useState("");
+  const [approvalEmailBusy, setApprovalEmailBusy] = useState(false);
+  const [approvalEmailError, setApprovalEmailError] = useState("");
+  const [approvalEmailReviewed, setApprovalEmailReviewed] = useState(false);
   const [studyTab, setStudyTab]       = useState<string>(CHECKLIST_TEMPLATE[0].section);
   const [generalInfoSubTab, setGeneralInfoSubTab] = useState<string>("Ship Info");
   const [shipNameEditing, setShipNameEditing] = useState(false);
@@ -1216,10 +1224,62 @@ export default function App() {
 
 
   function openApprovalEmailDraft(vessel: Vessel, study: SSCSStudy) {
-    const recipient = users.find(user => user.id === (study.submittedById ?? study.initiatedById))?.email?.trim() ?? "";
-    const { subject, body } = buildApprovalEmailDraft(vessel, study);
-    const mailto = `mailto:${encodeURIComponent(recipient)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-    window.location.href = mailto;
+    // Manual workflow: do not derive a recipient from legacy submitter IDs.
+    // The Terminal Officer reviews the approved study and chooses the receiver.
+    if (study.status !== "approved" || currentUser?.role !== "terminal_officer") return;
+    setApprovalEmailDraft({ vessel, study });
+    setApprovalEmailTo("");
+    setApprovalEmailError("");
+    setApprovalEmailReviewed(false);
+  }
+
+  function closeApprovalEmailDraft() {
+    if (approvalEmailBusy) return;
+    setApprovalEmailDraft(null);
+    setApprovalEmailTo("");
+    setApprovalEmailError("");
+    setApprovalEmailReviewed(false);
+  }
+
+  async function sendManualApprovalEmail() {
+    if (!approvalEmailDraft || approvalEmailBusy || currentUser?.role !== "terminal_officer") return;
+    const recipient = approvalEmailTo.trim();
+    if (!/^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(recipient)) {
+      setApprovalEmailError("Enter one valid recipient email address.");
+      return;
+    }
+    if (!approvalEmailReviewed) {
+      setApprovalEmailError("Please confirm that you reviewed the study before sending.");
+      return;
+    }
+    if (approvalEmailDraft.study.status !== "approved") {
+      setApprovalEmailError("Only an approved study can be sent.");
+      return;
+    }
+
+    setApprovalEmailBusy(true);
+    setApprovalEmailError("");
+    try {
+      // Reuse the same HTML email service as the normal Approve Study flow.
+      // This does not regenerate files or call saveCloudStudy / approveStudy.
+      await notifyShipOfficerStudyApproved({
+        vesselName: approvalEmailDraft.vessel.name || approvalEmailDraft.study.vesselName,
+        approvedByName: approvalEmailDraft.study.reviewedByName || "LMPT2 Terminal Officer",
+        shipEmail: recipient,
+        approvalSummaryHtml: buildApprovalEmailDraft(
+          approvalEmailDraft.vessel, approvalEmailDraft.study,
+        ).approvalSummaryHtml,
+      });
+      setApprovalEmailDraft(null);
+      setApprovalEmailTo("");
+      setApprovalEmailReviewed(false);
+      showToast(`Approval email sent to ${recipient}.`, "success");
+    } catch (err) {
+      console.error("[Manual approval email failed]", err);
+      setApprovalEmailError(err instanceof Error ? err.message : "Unable to send approval email.");
+    } finally {
+      setApprovalEmailBusy(false);
+    }
   }
 
   async function loadCloudData() {
@@ -4176,7 +4236,7 @@ setPage("study");
                   )}
 
 
-                  {/* Terminal Officer: open a pre-filled email draft; nothing is sent automatically. */}
+                  {/* Terminal Officer: preview the approved HTML email and manually select the recipient. */}
                   {isTerminal && study.status === "approved" && (
                     <button onClick={() => openApprovalEmailDraft(v, study)}
                       className="flex items-center gap-2 px-4 py-2 rounded border border-sky-500/30 bg-sky-500/5 hover:bg-sky-500/10 text-xs font-mono text-sky-400 transition-colors">
@@ -4233,6 +4293,107 @@ setPage("study");
           </div>
         </div>
         <TaskFloater tasks={myTasks} open={showTaskPanel} onToggle={() => setShowTaskPanel(p => !p)} onSelect={goToStudyFromTask} />
+        {/* Manual approval email: user chooses receiver and explicitly clicks Send. */}
+        {approvalEmailDraft && (
+          <div
+            className="fixed inset-0 z-[110] flex items-center justify-center bg-background/85 p-4 backdrop-blur-sm"
+            onClick={closeApprovalEmailDraft}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="Approval email preview"
+              className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b border-border px-5 py-4">
+                <div>
+                  <h2 className="flex items-center gap-2 text-sm font-bold text-foreground">
+                    <Mail className="h-4 w-4 text-sky-400" /> Approval Email Preview
+                  </h2>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Draft only — nothing is sent until you click Send Email.
+                  </p>
+                </div>
+                <button type="button" disabled={approvalEmailBusy} onClick={closeApprovalEmailDraft}
+                  aria-label="Close email preview" className="rounded p-1.5 text-muted-foreground hover:bg-secondary disabled:opacity-50">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="space-y-4 overflow-y-auto p-5">
+                <div>
+                  <label htmlFor="manual-approval-recipient" className="mb-1 block text-xs font-semibold text-foreground">
+                    To — enter recipient email address
+                  </label>
+                  <input id="manual-approval-recipient" type="email" autoComplete="off"
+                    value={approvalEmailTo} onChange={e => { setApprovalEmailTo(e.target.value); setApprovalEmailError(""); }}
+                    placeholder="recipient@example.com" disabled={approvalEmailBusy}
+                    className="w-full rounded border border-border bg-background px-3 py-2.5 text-sm text-foreground outline-none focus:border-sky-400 disabled:opacity-50" />
+                  <p className="mt-1 text-[11px] text-muted-foreground">The recipient is not selected automatically. One email address per send.</p>
+                </div>
+                <div>
+                  <p className="mb-1 text-xs font-semibold text-foreground">Subject</p>
+                  <div className="rounded border border-border bg-secondary/50 px-3 py-2 text-sm text-foreground">
+                    SSCS Study Approved — {approvalEmailDraft.vessel.name || approvalEmailDraft.study.vesselName}
+                  </div>
+                </div>
+                <div className="overflow-hidden rounded border border-border bg-white text-slate-900">
+                  <div className="border-t-[6px] border-green-700 bg-green-50 px-6 py-5">
+                    <div className="text-xs font-bold tracking-wide text-green-800">STATUS UPDATE</div>
+                    <h3 className="mt-2 text-2xl font-bold text-black">
+                      SSCS Study Approved — {approvalEmailDraft.vessel.name || approvalEmailDraft.study.vesselName}
+                    </h3>
+                    <div className="mt-4 bg-green-700 px-1.5 py-0.5 text-xs font-bold text-white">APPROVED</div>
+                  </div>
+                  <div className="space-y-4 p-6 text-sm leading-relaxed">
+                    <p>
+                      Your SSCS compatibility study for <strong>{approvalEmailDraft.vessel.name || approvalEmailDraft.study.vesselName}</strong>
+                      {" "}has been approved by {approvalEmailDraft.study.reviewedByName || "LMPT2 Terminal Officer"}.
+                    </p>
+                    <div>
+                      <p>The approved documents are now available in the SSCS system:</p>
+                      <ul className="mt-1 list-disc pl-5">
+                        <li>Confirmation List Between Ship &amp; Shore</li>
+                        <li>Ship Shore Compatibility Checklist</li>
+                      </ul>
+                    </div>
+                    <p>Please sign in to the SSCS system to view or download the approved documents.</p>
+                    <div dangerouslySetInnerHTML={{ __html: buildApprovalEmailDraft(
+                      approvalEmailDraft.vessel, approvalEmailDraft.study,
+                    ).approvalSummaryHtml }} />
+                  </div>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  This is an on-screen preview. The Send button uses the existing SSCS approval email service and its HTML template.
+                  No new approval, Excel generation or Study update is performed.
+                </p>
+                <label className="flex cursor-pointer items-start gap-2 text-xs text-foreground">
+                  <input type="checkbox" className="mt-0.5 accent-sky-500" checked={approvalEmailReviewed}
+                    disabled={approvalEmailBusy}
+                    onChange={e => { setApprovalEmailReviewed(e.target.checked); setApprovalEmailError(""); }} />
+                  I have manually reviewed the SSCS Study and confirmed it is ready to notify the selected recipient.
+                </label>
+                {approvalEmailError && (
+                  <p role="alert" className="rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">
+                    {approvalEmailError}
+                  </p>
+                )}
+              </div>
+              <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
+                <button type="button" onClick={closeApprovalEmailDraft} disabled={approvalEmailBusy}
+                  className="rounded border border-border px-4 py-2 text-xs text-muted-foreground hover:bg-secondary disabled:opacity-50">
+                  Cancel
+                </button>
+                <button type="button" onClick={() => void sendManualApprovalEmail()}
+                  disabled={approvalEmailBusy || !approvalEmailReviewed || !approvalEmailTo.trim()}
+                  className="flex items-center gap-2 rounded bg-sky-600 px-4 py-2 text-xs font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-40">
+                  {approvalEmailBusy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  {approvalEmailBusy ? "Sending…" : "Send Email"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {toast && <Toast {...toast} />}
       </div>
     );
