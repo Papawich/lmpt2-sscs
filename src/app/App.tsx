@@ -61,8 +61,9 @@ import {
   deleteStudyDocument,
   fetchShipSeries, createShipSeries, updateShipSeriesMembers,
   renameShipSeries, fetchSeriesDocuments, uploadSeriesDocument, unlinkSeriesDocument,
+  fetchRepresentativeApprovedDocuments, linkExistingSeriesDocument, linkAvailableRepresentativeDocuments,
 } from "./backendService";
-import type { ShipSeries, SeriesDocument } from "./backendService";
+import type { ShipSeries, SeriesDocument, RepresentativeDocument } from "./backendService";
 import type { CloudPasswordResetRequest, CloudVesselAccess } from "./backendService";
 import { generateApprovalDocuments } from "./approvalDocumentService";
 import {
@@ -1169,6 +1170,9 @@ export default function App() {
   const [seriesRepresentativeId, setSeriesRepresentativeId] = useState<number | null>(null);
   const [selectedSeriesId, setSelectedSeriesId] = useState<string | null>(null);
   const [seriesMemberSearch, setSeriesMemberSearch] = useState('');
+  const [representativeDocs, setRepresentativeDocs] = useState<RepresentativeDocument[]>([]);
+  const [selectedReferenceDocId, setSelectedReferenceDocId] = useState('');
+  const [referenceDocsLoading, setReferenceDocsLoading] = useState(false);
   const [seriesBusy, setSeriesBusy] = useState(false);
   const [seriesError, setSeriesError] = useState('');
   const [seriesUploadKey, setSeriesUploadKey] = useState<DocKey>('d_2_1');
@@ -1348,6 +1352,19 @@ export default function App() {
     }
     return result;
   }
+  // Browse existing approved reference documents; no bytes are copied.
+  useEffect(() => {
+    const group = shipSeries.find(s => s.id === selectedSeriesId);
+    if (!group || !supabaseConfigured) { setRepresentativeDocs([]); setSelectedReferenceDocId(''); return; }
+    let cancelled = false;
+    setReferenceDocsLoading(true);
+    fetchRepresentativeApprovedDocuments(group.representativeVesselId)
+      .then(docs => { if (!cancelled) setRepresentativeDocs(docs); })
+      .catch(err => { if (!cancelled) setSeriesError(err instanceof Error ? err.message : String(err)); })
+      .finally(() => { if (!cancelled) setReferenceDocsLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedSeriesId, shipSeries]);
+
   async function handleSeriesFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     const id = selectedSeriesId;
@@ -3223,24 +3240,52 @@ setPage("study");
                 {(() => {
                   const series = shipSeries.find(s => s.id === selectedSeriesId);
                   if (!series) return <p className="text-xs text-muted-foreground p-3">Select a series to manage sister ships and shared documents.</p>;
-                  const eligible = vessels.filter(v => v.id !== series.representativeVesselId && (series.members.includes(v.id) || !seriesForVessel(v.id)))
-                    .filter(v => [v.name,v.imo].some(x => x.toLowerCase().includes(seriesMemberSearch.toLowerCase()))).slice(0,60);
-                  return <div className="border border-border rounded p-4 space-y-4">
+                  const selectedSisters = vessels.filter(v => v.id !== series.representativeVesselId && series.members.includes(v.id))
+                    .sort((a,b) => a.name.localeCompare(b.name));
+                  const eligible = vessels.filter(v => v.id !== series.representativeVesselId && !seriesForVessel(v.id))
+                    .filter(v => [v.name, v.imo].some(x => x.toLowerCase().includes(seriesMemberSearch.trim().toLowerCase())))
+                    .sort((a,b) => a.name.localeCompare(b.name)).slice(0,60);
+                  const availableReferences = representativeDocs.filter(d => d.docKey === seriesUploadKey && !seriesDocs.some(sd => sd.seriesId === series.id && sd.sourceDocumentId === d.id));
+                  return <div className="border border-border rounded p-4 space-y-4 min-w-0">
                     <div><p className="text-sm font-semibold">{series.name}</p><p className="text-xs text-muted-foreground">Representative: {vessels.find(v => v.id === series.representativeVesselId)?.name} · IMO {vessels.find(v => v.id === series.representativeVesselId)?.imo}</p></div>
-                    <div className="space-y-2"><p className="text-xs font-mono font-semibold">SISTER SHIPS ({Math.max(series.members.length - 1,0)})</p>
-                      <input placeholder="Search vessels by name or IMO" value={seriesMemberSearch} onChange={e => setSeriesMemberSearch(e.target.value)} className="w-full rounded border border-border bg-background p-2 text-xs" />
-                      <div className="max-h-44 overflow-y-auto space-y-1">{eligible.map(v => <label key={v.id} className="flex items-center gap-2 px-2 py-1 text-xs hover:bg-secondary rounded"><input type="checkbox" disabled={seriesBusy} checked={series.members.includes(v.id)} onChange={e => void runSeriesAction(() => updateShipSeriesMembers(series.id, e.target.checked ? [...series.members,v.id] : series.members.filter(id => id !== v.id)), e.target.checked ? 'Sister ship added.' : 'Sister ship removed.')} />{v.name} · {v.imo}</label>)}</div>
+                    <div className="space-y-2">
+                      <p className="text-xs font-mono font-semibold">SELECTED SISTER SHIPS ({selectedSisters.length})</p>
+                      <div className="flex flex-nowrap items-center gap-2 overflow-x-auto rounded border border-primary/20 bg-primary/5 px-3 py-3 min-h-12">
+                        {selectedSisters.length === 0 && <p className="text-xs text-muted-foreground">No sister ships selected yet.</p>}
+                        {selectedSisters.map(v => <div key={v.id} className="inline-flex shrink-0 items-center gap-2 rounded-full border border-primary/40 bg-background px-3 py-1.5 text-xs font-mono whitespace-nowrap">
+                          <span className="truncate" title={`${v.name} · ${v.imo}`}>{v.name}</span>
+                          <button type="button" disabled={seriesBusy} aria-label={`Remove ${v.name} from series`} title="Remove from series" className="text-muted-foreground hover:text-destructive disabled:opacity-50" onClick={() => void runSeriesAction(() => updateShipSeriesMembers(series.id, series.members.filter(id => id !== v.id)), `${v.name} removed from series.`)}><X className="w-3 h-3" /></button>
+                        </div>)}
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">Add another sister ship by name or IMO. Selected vessels stay together above.</p>
+                      <input placeholder="Search unassigned vessels by name or IMO" value={seriesMemberSearch} onChange={e => setSeriesMemberSearch(e.target.value)} className="w-full rounded border border-border bg-background p-2 text-xs" />
+                      <div className="max-h-32 overflow-y-auto space-y-1 border border-border/50 rounded p-1">
+                        {eligible.map(v => <button type="button" key={v.id} disabled={seriesBusy} onClick={() => void runSeriesAction(async () => { await updateShipSeriesMembers(series.id,[...series.members,v.id]); setSeriesMemberSearch(''); }, `${v.name} added to series.`)} className="w-full flex justify-between items-center gap-2 px-2 py-1.5 text-left text-xs hover:bg-secondary rounded disabled:opacity-50"><span>{v.name} · {v.imo}</span><Plus className="w-3.5 h-3.5 shrink-0" /></button>)}
+                        {eligible.length === 0 && <p className="text-xs text-muted-foreground p-2">No unassigned matching vessels.</p>}
+                      </div>
                     </div>
-                    <div className="border-t border-border pt-3 space-y-2"><p className="text-xs font-mono font-semibold">SERIES SHARED DOCUMENTS</p>
-                      <p className="text-[11px] text-muted-foreground">Drawing 2.1–2.5, Manual 3.x, Optimoor 4.x only. File is stored once. Certificates and item 2.6 are vessel-specific.</p>
-                      <div className="flex gap-2"><select aria-label="Shared document type" value={seriesUploadKey} onChange={e => setSeriesUploadKey(e.target.value as DocKey)} className="flex-1 min-w-0 rounded border border-border bg-background p-2 text-xs">
+                    <div className="border-t border-border pt-3 space-y-3"><p className="text-xs font-mono font-semibold">SERIES SHARED DOCUMENTS</p>
+                      <p className="text-[11px] text-muted-foreground">Link approved documents from the representative vessel without re-uploading, or upload a new version. Each Study retains its own documents. Shared files are read-only in the Study.</p>
+                      <select aria-label="Shared document type" value={seriesUploadKey} onChange={e => { setSeriesUploadKey(e.target.value as DocKey); setSelectedReferenceDocId(''); }} className="w-full rounded border border-border bg-background p-2 text-xs">
                         {SERIES_SHARED_DOC_KEYS.map(k => <option key={k} value={k}>{k.replace('d_','').replace('_','.')}</option>)}
-                      </select><input ref={seriesFileInput} type="file" className="hidden" onChange={e => void handleSeriesFileSelected(e)} />
-                      <button type="button" disabled={seriesBusy} onClick={() => seriesFileInput.current?.click()} className="px-3 border border-primary/40 rounded text-primary text-xs"><Upload className="w-3 h-3 inline mr-1"/>Upload</button></div>
+                      </select>
+                      <div className="rounded border border-sky-500/20 p-3 space-y-2">
+                        <p className="text-xs font-semibold text-sky-400">Use existing approved reference document</p>
+                        <button type="button" disabled={seriesBusy || referenceDocsLoading || representativeDocs.length === 0} onClick={() => void runSeriesAction(async () => { const count = await linkAvailableRepresentativeDocuments(series.id); if (!count) throw new Error('No new approved representative documents are available to link. Existing shared slots were kept.'); }, 'Reference documents linked from the representative vessel without uploading.')} className="w-full rounded border border-sky-500/40 bg-sky-500/5 px-3 py-2 text-left text-xs text-sky-400 hover:bg-sky-500/10 disabled:opacity-40"><CheckCheck className="w-3.5 h-3.5 inline mr-1" />Use existing approved documents for all empty shared slots</button>
+                        <select aria-label="Existing approved representative document" value={selectedReferenceDocId} onChange={e => setSelectedReferenceDocId(e.target.value)} className="w-full min-w-0 rounded border border-border bg-background p-2 text-xs">
+                          <option value="">{referenceDocsLoading ? 'Loading existing documents...' : availableReferences.length ? 'Select document to link...' : 'No unlinked approved files for this slot'}</option>
+                          {availableReferences.map(d => <option key={d.id} value={d.id}>{d.name} · {d.studyId}</option>)}
+                        </select>
+                        <button type="button" disabled={seriesBusy || !selectedReferenceDocId} onClick={() => void runSeriesAction(async () => { await linkExistingSeriesDocument(series.id, selectedReferenceDocId); setSelectedReferenceDocId(''); }, 'Existing approved file linked without re-upload.')} className="rounded border border-sky-500/40 px-3 py-2 text-xs text-sky-400 disabled:opacity-40"><FilePlus className="w-3.5 h-3.5 inline mr-1" />Link existing document</button>
+                      </div>
+                      <div className="flex items-center gap-2"><input ref={seriesFileInput} type="file" className="hidden" onChange={e => void handleSeriesFileSelected(e)} />
+                        <button type="button" disabled={seriesBusy} onClick={() => { if(seriesFileInput.current) seriesFileInput.current.value=''; seriesFileInput.current?.click(); }} className="px-3 py-2 border border-primary/40 rounded text-primary text-xs"><Upload className="w-3 h-3 inline mr-1" />Upload new / updated file</button>
+                        <span className="text-[10px] text-muted-foreground">To retire a previous version, unlink it after verifying the new file.</span></div>
                       {seriesDocs.filter(d => d.seriesId === series.id).map(d => <div key={d.id} className="flex gap-2 items-center text-[11px] border border-border rounded p-2">
                         <span className="text-muted-foreground shrink-0">{d.docKey.replace('d_','').replace('_','.')}</span><span className="truncate flex-1" title={d.name}>{d.name}</span>
-                        <button onClick={() => void getStudyDocumentUrl(d.storagePath!).then(url => window.open(url,'_blank','noopener,noreferrer')).catch(err => setSeriesError(String(err)))} title="Open shared file"><Download className="w-3.5 h-3.5"/></button>
-                        <button disabled={seriesBusy} onClick={() => askConfirmation('Unlink shared file', `Remove ${d.name} from this series? Storage file is retained.`, () => runSeriesAction(() => unlinkSeriesDocument(d.id), 'Shared document unlinked.'))} title="Unlink from series"><X className="w-3.5 h-3.5 text-red-400"/></button>
+                        <span className="text-[9px] shrink-0 text-sky-400">{d.sourceDocumentId ? 'Existing reference' : 'Series upload'}</span>
+                        <button type="button" onClick={() => void getStudyDocumentUrl(d.storagePath!).then(url => window.open(url,'_blank','noopener,noreferrer')).catch(err => setSeriesError(String(err)))} title="Open shared file"><Download className="w-3.5 h-3.5"/></button>
+                        <button type="button" disabled={seriesBusy} onClick={() => askConfirmation('Unlink shared file', `Remove ${d.name} from this series? Original Storage file is retained.`, () => runSeriesAction(() => unlinkSeriesDocument(d.id), 'Shared document unlinked.'))} title="Unlink from series"><X className="w-3.5 h-3.5 text-red-400"/></button>
                       </div>)}
                     </div>
                   </div>;
@@ -4123,6 +4168,20 @@ setPage("study");
             </div>
           )}
 
+          {(() => {
+            const currentSeries = seriesForVessel(v.id);
+            if (!currentSeries) return null;
+            const rep = vessels.find(item => item.id === currentSeries.representativeVesselId);
+            const siblings = currentSeries.members.filter(id => id !== currentSeries.representativeVesselId)
+              .map(id => vessels.find(item => item.id === id)?.name).filter(Boolean);
+            return <div className="border border-sky-500/25 bg-sky-500/5 rounded p-5 mb-6">
+              <p className="font-mono text-xs font-bold uppercase tracking-widest text-sky-400">Ship Series · {currentSeries.name}</p>
+              <p className="text-xs mt-2 text-foreground">Reference vessel: {rep?.name || 'Unknown'} ({rep?.imo || '—'})</p>
+              <div className="flex flex-wrap items-center gap-2 mt-3">{siblings.map(name => <span key={name} className="inline-flex rounded-full border border-sky-500/30 px-2.5 py-1 text-[11px] text-sky-400">{name}</span>)}</div>
+              <p className="text-[11px] text-muted-foreground mt-3">Series relationship and shared document reference. Formal Sister Ship Verification is managed separately.</p>
+            </div>;
+          })()}
+
           {v.isSisterShip && (
             <div className={`border rounded p-5 mb-6 ${
               v.sisterShipStatus === "verified" ? "border-emerald-500/30 bg-emerald-500/5"
@@ -4581,6 +4640,8 @@ setPage("study");
     const vessel = vessels.find(v => v.id === activeStudy.vesselId);
     const canRenameShip = Boolean(vessel && (isTerminal || currentUser.isAdmin || shipHasVesselAccess));
     const verifiedSisterShip = Boolean(vessel?.isSisterShip && vessel.sisterShipStatus === "verified");
+    const currentShipSeries = vessel ? seriesForVessel(vessel.id) : undefined;
+    const seriesRepresentative = currentShipSeries ? vessels.find(v => v.id === currentShipSeries.representativeVesselId) : undefined;
     const referenceVessel = vessel?.referenceVesselId ? vessels.find(candidate => candidate.id === vessel.referenceVesselId) : undefined;
     const inheritedSectionReadOnly = (section: string) =>
   verifiedSisterShip &&
@@ -4651,6 +4712,19 @@ setPage("study");
               ))}
             </div>
           </div>
+
+          {currentShipSeries && seriesRepresentative && (
+            <div className="mb-4 flex items-start gap-2.5 rounded border border-sky-500/25 bg-sky-500/5 px-4 py-3">
+              <Ship className="w-4 h-4 text-sky-400 mt-0.5 shrink-0" />
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-widest text-sky-400 font-bold">
+                  {vessel?.id === currentShipSeries.representativeVesselId ? 'Ship Series Representative' : 'Ship Series Sister Ship'} · {currentShipSeries.name}
+                </p>
+                <p className="text-[11px] text-muted-foreground mt-1">Reference vessel: {seriesRepresentative.name} ({seriesRepresentative.imo}). Sister ships in this series: {currentShipSeries.members.filter(id => id !== currentShipSeries.representativeVesselId).map(id => vessels.find(v => v.id === id)?.name).filter(Boolean).join(', ') || 'None'}.</p>
+                <p className="text-[11px] text-muted-foreground mt-1">Shared series documents appear in Required Documents when no vessel-specific file exists. Ship Series membership alone does not change formal Sister Ship Verification or Study approval status.</p>
+              </div>
+            </div>
+          )}
 
           {verifiedSisterShip && referenceVessel && (
             <div className="mb-4 flex items-start gap-2.5 rounded border border-sky-500/25 bg-sky-500/5 px-4 py-3">
@@ -5126,7 +5200,7 @@ setPage("study");
                   getDownloadUrl={supabaseConfigured ? handleDocumentDownload : undefined}
                   sisterShip={Boolean(vessel?.isSisterShip)}
                   sisterShipVerified={verifiedSisterShip}
-                  referenceVesselName={referenceVessel?.name}
+                  referenceVesselName={referenceVessel?.name || (vessel?.id !== currentShipSeries?.representativeVesselId ? seriesRepresentative?.name : undefined)}
                   inheritedKeys={verifiedSisterShip ? SISTER_BORROWED_DOC_KEYS : []}
                   seriesDocuments={vessel ? sharedDocsForVessel(vessel.id) : {}}
                   seriesName={vessel ? seriesForVessel(vessel.id)?.name : undefined}

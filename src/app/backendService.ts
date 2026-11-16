@@ -816,7 +816,8 @@ export async function deleteStudyDocument(file: CloudUploadedFile) {
 
 // Ship Series are independent of the legacy sister-ship verification/approval workflow.
 export type ShipSeries = { id: string; name: string; representativeVesselId: number; notes: string; members: number[] };
-export type SeriesDocument = CloudUploadedFile & { seriesId: string; docKey: string };
+export type SeriesDocument = CloudUploadedFile & { seriesId: string; docKey: string; sourceDocumentId?: string | null };
+export type RepresentativeDocument = CloudUploadedFile & { studyId: string; docKey: string };
 
 export async function fetchShipSeries(): Promise<ShipSeries[]> {
   const client = requireSupabase();
@@ -856,13 +857,13 @@ export async function renameShipSeries(seriesId: string, name: string, notes: st
 
 export async function fetchSeriesDocuments(): Promise<SeriesDocument[]> {
   const { data, error } = await requireSupabase().from('ship_series_documents')
-    .select('id,series_id,doc_key,file_name,file_size,mime_type,storage_path,created_at')
+    .select('id,series_id,doc_key,file_name,file_size,mime_type,storage_path,created_at,source_document_id')
     .order('created_at', { ascending: false });
   if (error) throw error;
   return (data ?? []).map((d: any) => ({
     id: d.id, seriesId: d.series_id, docKey: d.doc_key, name: d.file_name,
     size: d.file_size ?? 0, type: d.mime_type ?? '', uploadedAt: d.created_at,
-    storagePath: d.storage_path,
+    storagePath: d.storage_path, sourceDocumentId: d.source_document_id ?? null,
   }));
 }
 
@@ -888,4 +889,43 @@ export async function uploadSeriesDocument(seriesId: string, docKey: string, fil
 export async function unlinkSeriesDocument(id: string): Promise<void> {
   const { error } = await requireSupabase().from('ship_series_documents').delete().eq('id', id);
   if (error) throw error;
+}
+
+// Reuse an existing document from an APPROVED study of the series representative.
+// No storage copies, no updates to old approved studies.
+const APPROVED_SERIES_DOC_KEYS = ["d_2_1","d_2_2","d_2_3","d_2_4","d_2_5","d_3_1","d_3_2","d_3_3","d_3_4","d_4_1","d_4_2"];
+export async function fetchRepresentativeApprovedDocuments(representativeVesselId: number): Promise<RepresentativeDocument[]> {
+  const client = requireSupabase();
+  const { data: studies, error: studiesError } = await client.from('sscs_studies')
+    .select('id').eq('vessel_id', representativeVesselId).eq('status', 'approved');
+  if (studiesError) throw studiesError;
+  const studyIds = (studies ?? []).map((s: any) => s.id);
+  if (!studyIds.length) return [];
+  const { data, error } = await client.from('documents')
+    .select('id,study_id,document_type,file_name,file_size,mime_type,storage_path,created_at')
+    .in('study_id', studyIds).in('document_type', APPROVED_SERIES_DOC_KEYS)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((d: any) => ({
+    id: d.id, studyId: d.study_id, docKey: d.document_type, name: d.file_name,
+    size: Number(d.file_size ?? 0), type: d.mime_type ?? '',
+    uploadedAt: d.created_at, storagePath: d.storage_path,
+  }));
+}
+
+export async function linkExistingSeriesDocument(seriesId: string, documentId: string): Promise<void> {
+  // The RPC validates admin rights, approved status, representative vessel, and allowed doc key.
+  const { error } = await requireSupabase().rpc('admin_link_series_reference_document', {
+    p_series_id: seriesId, p_document_id: documentId,
+  });
+  if (error) throw error;
+}
+
+/** Link shared slots from the representative's latest approved Study in one action. */
+export async function linkAvailableRepresentativeDocuments(seriesId: string): Promise<number> {
+  const { data, error } = await requireSupabase().rpc('admin_link_all_series_reference_documents', {
+    p_series_id: seriesId,
+  });
+  if (error) throw error;
+  return Number(data ?? 0);
 }
