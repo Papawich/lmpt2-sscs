@@ -627,6 +627,15 @@ function escapeEmailHtml(value: unknown) {
     .replace(/'/g, "&#039;");
 }
 
+// Manual email recipients: commas, semicolons and whitespace/newlines are accepted.
+function parseApprovalEmailAddresses(input: string): string[] {
+  return Array.from(new Set(input.split(/[;,\s]+/).map(value => value.trim().toLowerCase()).filter(Boolean)));
+}
+
+function validApprovalEmailAddress(value: string): boolean {
+  return /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(value);
+}
+
 function buildApprovalEmailDraft(vessel: Vessel, study: SSCSStudy) {
   const gi = (id: string) => study.items.find(i => i.id === id)?.value?.trim() ?? "";
   const vesselName = vessel.name || study.vesselName;
@@ -1054,6 +1063,7 @@ export default function App() {
     vessel: Vessel; study: SSCSStudy;
   } | null>(null);
   const [approvalEmailTo, setApprovalEmailTo] = useState("");
+  const [approvalEmailCc, setApprovalEmailCc] = useState("");
   const [approvalEmailBusy, setApprovalEmailBusy] = useState(false);
   const [approvalEmailError, setApprovalEmailError] = useState("");
   const [approvalEmailReviewed, setApprovalEmailReviewed] = useState(false);
@@ -1229,6 +1239,7 @@ export default function App() {
     if (study.status !== "approved" || currentUser?.role !== "terminal_officer") return;
     setApprovalEmailDraft({ vessel, study });
     setApprovalEmailTo("");
+    setApprovalEmailCc("");
     setApprovalEmailError("");
     setApprovalEmailReviewed(false);
   }
@@ -1237,17 +1248,29 @@ export default function App() {
     if (approvalEmailBusy) return;
     setApprovalEmailDraft(null);
     setApprovalEmailTo("");
+    setApprovalEmailCc("");
     setApprovalEmailError("");
     setApprovalEmailReviewed(false);
   }
 
   async function sendManualApprovalEmail() {
     if (!approvalEmailDraft || approvalEmailBusy || currentUser?.role !== "terminal_officer") return;
-    const recipient = approvalEmailTo.trim();
-    if (!/^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(recipient)) {
-      setApprovalEmailError("Enter one valid recipient email address.");
+    const toRecipients = parseApprovalEmailAddresses(approvalEmailTo);
+    const ccRecipients = parseApprovalEmailAddresses(approvalEmailCc);
+    if (toRecipients.length === 0 || toRecipients.some(email => !validApprovalEmailAddress(email))) {
+      setApprovalEmailError("Enter at least one valid To address. Separate multiple addresses with commas, semicolons or new lines.");
       return;
     }
+    if (ccRecipients.some(email => !validApprovalEmailAddress(email))) {
+      setApprovalEmailError("Check the Cc addresses. Each address must be a valid email.");
+      return;
+    }
+    if (toRecipients.length + ccRecipients.length > 50) {
+      setApprovalEmailError("Use 50 or fewer total To/Cc recipients per email.");
+      return;
+    }
+    const toSet = new Set(toRecipients);
+    const uniqueCcRecipients = ccRecipients.filter(email => !toSet.has(email));
     if (!approvalEmailReviewed) {
       setApprovalEmailError("Please confirm that you reviewed the study before sending.");
       return;
@@ -1265,15 +1288,17 @@ export default function App() {
       await notifyShipOfficerStudyApproved({
         vesselName: approvalEmailDraft.vessel.name || approvalEmailDraft.study.vesselName,
         approvedByName: approvalEmailDraft.study.reviewedByName || "LMPT2 Terminal Officer",
-        shipEmail: recipient,
+        shipEmail: toRecipients,
+        ccEmails: uniqueCcRecipients,
         approvalSummaryHtml: buildApprovalEmailDraft(
           approvalEmailDraft.vessel, approvalEmailDraft.study,
         ).approvalSummaryHtml,
       });
       setApprovalEmailDraft(null);
       setApprovalEmailTo("");
+      setApprovalEmailCc("");
       setApprovalEmailReviewed(false);
-      showToast(`Approval email sent to ${recipient}.`, "success");
+      showToast(`Approval email sent to ${toRecipients.length} To and ${uniqueCcRecipients.length} Cc recipient(s).`, "success");
     } catch (err) {
       console.error("[Manual approval email failed]", err);
       setApprovalEmailError(err instanceof Error ? err.message : "Unable to send approval email.");
@@ -4323,13 +4348,25 @@ setPage("study");
               <div className="space-y-4 overflow-y-auto p-5">
                 <div>
                   <label htmlFor="manual-approval-recipient" className="mb-1 block text-xs font-semibold text-foreground">
-                    To — enter recipient email address
+                    To — main recipients (multiple allowed)
                   </label>
-                  <input id="manual-approval-recipient" type="email" autoComplete="off"
+                  <textarea id="manual-approval-recipient" rows={2} autoComplete="off"
                     value={approvalEmailTo} onChange={e => { setApprovalEmailTo(e.target.value); setApprovalEmailError(""); }}
-                    placeholder="recipient@example.com" disabled={approvalEmailBusy}
-                    className="w-full rounded border border-border bg-background px-3 py-2.5 text-sm text-foreground outline-none focus:border-sky-400 disabled:opacity-50" />
-                  <p className="mt-1 text-[11px] text-muted-foreground">The recipient is not selected automatically. One email address per send.</p>
+                    placeholder="captain@example.com; operations@example.com" disabled={approvalEmailBusy}
+                    className="w-full resize-y rounded border border-border bg-background px-3 py-2.5 text-sm text-foreground outline-none focus:border-sky-400 disabled:opacity-50" />
+                </div>
+                <div>
+                  <label htmlFor="manual-approval-cc" className="mb-1 block text-xs font-semibold text-foreground">
+                    Cc — copy recipients (optional, multiple allowed)
+                  </label>
+                  <textarea id="manual-approval-cc" rows={2} autoComplete="off"
+                    value={approvalEmailCc} onChange={e => { setApprovalEmailCc(e.target.value); setApprovalEmailError(""); }}
+                    placeholder="terminal@example.com; manager@example.com" disabled={approvalEmailBusy}
+                    className="w-full resize-y rounded border border-border bg-background px-3 py-2.5 text-sm text-foreground outline-none focus:border-sky-400 disabled:opacity-50" />
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    Separate addresses with commas, semicolons or new lines. No recipients are preselected.
+                    The configured workflow Cc is not automatically included for a manual send.
+                  </p>
                 </div>
                 <div>
                   <p className="mb-1 text-xs font-semibold text-foreground">Subject</p>

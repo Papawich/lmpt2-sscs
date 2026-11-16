@@ -117,7 +117,7 @@ function formatEventTime(): string {
 const appUrl = ((import.meta.env.VITE_APP_URL as string | undefined)?.trim() || "https://sscs.marine-lmpt2.com");
 
 function normalizeRecipients(value: string | string[]): string {
-  const recipients = Array.isArray(value) ? value : value.split(/[;,]/);
+  const recipients = Array.isArray(value) ? value : value.split(/[;,\s]+/);
 
   return Array.from(
     new Set(
@@ -139,8 +139,14 @@ async function send(
   fromName = "LMPT2 SSCS System",
   includeWorkflowCc = false,
   approvalSummaryHtml = "",
+  ccOverride?: string | string[],
 ): Promise<void> {
   const recipientEmail = normalizeRecipients(toEmail);
+  // An explicit CC list (including an empty list) overrides workflow CC.
+  // Existing approval flows keep their configured workflow CC unchanged.
+  const ccEmail = ccOverride === undefined
+    ? (includeWorkflowCc ? workflowCcEmail : "")
+    : normalizeRecipients(ccOverride);
   if (!recipientEmail) {
     console.info("[LMPT2 Email — no recipient]", { subject, message });
     return;
@@ -149,7 +155,7 @@ async function send(
   if (!configured) {
     console.info("[LMPT2 Email — Supabase not configured]", {
       toEmail: recipientEmail,
-      ccEmail: includeWorkflowCc ? workflowCcEmail : "",
+      ccEmail,
       subject,
       message,
     });
@@ -161,7 +167,7 @@ async function send(
   const { data, error } = await client.functions.invoke("send-email", {
     body: {
       toEmail: recipientEmail,
-      ccEmail: includeWorkflowCc ? workflowCcEmail : "",
+      ccEmail,
       subject,
       message,
       fromName,
@@ -294,8 +300,9 @@ export async function notifyTerminalOfficerStudySubmitted(opts: {
 export async function notifyShipOfficerStudyApproved(opts: {
   vesselName: string;
   approvedByName: string;
-  shipEmail: string;
+  shipEmail: string | string[];
   approvalSummaryHtml?: string;
+  ccEmails?: string | string[];
 }) {
   await send(
     opts.shipEmail,
@@ -310,6 +317,7 @@ Please sign in to the SSCS system to view or download the approved documents.`,
     "LMPT2 SSCS System",
     true,
     opts.approvalSummaryHtml ?? "",
+    opts.ccEmails,
   );
 }
 
