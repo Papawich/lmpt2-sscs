@@ -5,7 +5,7 @@ import {
   Gauge, BarChart2, RefreshCw, Building2, ShieldCheck, ShieldX,
   Clock, Users, CheckCheck, XCircle, KeyRound, Send, Info,
   FileText, AlertTriangle, Edit3, ClipboardList, BadgeCheck,
-  RotateCcw, Pencil, FilePlus, Plus, ZoomIn, Trash2,
+  RotateCcw, Pencil, FilePlus, Plus, ZoomIn, Trash2, Upload,
 } from "lucide-react";
 import heroBg from "../imports/image-8.png";
 import {
@@ -59,7 +59,10 @@ import {
   getStudyDocumentUrl,
   fetchApprovalDocuments,
   deleteStudyDocument,
+  fetchShipSeries, createShipSeries, updateShipSeriesMembers,
+  renameShipSeries, fetchSeriesDocuments, uploadSeriesDocument, unlinkSeriesDocument,
 } from "./backendService";
+import type { ShipSeries, SeriesDocument } from "./backendService";
 import type { CloudPasswordResetRequest, CloudVesselAccess } from "./backendService";
 import { generateApprovalDocuments } from "./approvalDocumentService";
 import {
@@ -496,6 +499,8 @@ const SISTER_MAJOR_DIMENSION_IDS = new Set([
   "gi-14", "gi-15", "gi-16", "gi-17", "gi-18", "gi-19",
   "gi-20", "gi-21", "gi-22", "gi-23", "gi-24", "gi-25",
 ]);
+
+const SERIES_SHARED_DOC_KEYS: DocKey[] = ["d_2_1","d_2_2","d_2_3","d_2_4","d_2_5","d_3_1","d_3_2","d_3_3","d_3_4","d_4_1","d_4_2"];
 
 const SISTER_BORROWED_DOC_KEYS: DocKey[] = [
   "d_2_1", "d_2_2", "d_2_3", "d_2_4", "d_2_5",
@@ -1158,6 +1163,17 @@ export default function App() {
 
   // ── Admin state ──────────────────────────────────────────────────────────────
   const [adminTab, setAdminTab] = useState<AdminTab>("pending");
+  const [shipSeries, setShipSeries] = useState<ShipSeries[]>([]);
+  const [seriesDocs, setSeriesDocs] = useState<SeriesDocument[]>([]);
+  const [seriesNameInput, setSeriesNameInput] = useState('');
+  const [seriesRepresentativeId, setSeriesRepresentativeId] = useState<number | null>(null);
+  const [selectedSeriesId, setSelectedSeriesId] = useState<string | null>(null);
+  const [seriesMemberSearch, setSeriesMemberSearch] = useState('');
+  const [seriesBusy, setSeriesBusy] = useState(false);
+  const [seriesError, setSeriesError] = useState('');
+  const [seriesUploadKey, setSeriesUploadKey] = useState<DocKey>('d_2_1');
+  const seriesFileInput = useRef<HTMLInputElement>(null);
+
   const [passwordResetRequests, setPasswordResetRequests] = useState<CloudPasswordResetRequest[]>([]);
   const [passwordResetLoading, setPasswordResetLoading] = useState(false);
 
@@ -1307,14 +1323,49 @@ export default function App() {
     }
   }
 
+  async function refreshSeries() {
+    const [groups, docs] = await Promise.all([fetchShipSeries(), fetchSeriesDocuments()]);
+    setShipSeries(groups); setSeriesDocs(docs);
+  }
+  async function runSeriesAction(action: () => Promise<void>, success: string) {
+    if (!currentUser?.isAdmin || seriesBusy) return;
+    setSeriesBusy(true); setSeriesError('');
+    try { await action(); await refreshSeries(); showToast(success); }
+    catch (err) { setSeriesError(err instanceof Error ? err.message : 'Series action failed'); }
+    finally { setSeriesBusy(false); }
+  }
+  function seriesForVessel(vesselId: number) {
+    return shipSeries.find(s => s.members.includes(vesselId));
+  }
+  function sharedDocsForVessel(vesselId: number): Partial<Record<DocKey, UploadedFile[]>> {
+    const group = seriesForVessel(vesselId);
+    if (!group) return {};
+    const result: Partial<Record<DocKey, UploadedFile[]>> = {};
+    for (const file of seriesDocs.filter(d => d.seriesId === group.id)) {
+      const k = file.docKey as DocKey;
+      if (!SERIES_SHARED_DOC_KEYS.includes(k)) continue;
+      (result[k] ??= []).push(file);
+    }
+    return result;
+  }
+  async function handleSeriesFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    const id = selectedSeriesId;
+    if (!file || !id) return;
+    await runSeriesAction(() => uploadSeriesDocument(id, seriesUploadKey, file), 'Shared document uploaded.');
+    e.target.value = '';
+  }
+
   async function loadCloudData() {
     if (!supabaseConfigured) return;
-    const [cloudUsers, cloudVesselAccesses, cloudVessels, cloudStudies, cloudApprovedReferenceVesselIds] = await Promise.all([
+    const [cloudUsers, cloudVesselAccesses, cloudVessels, cloudStudies, cloudApprovedReferenceVesselIds, cloudShipSeries, cloudSeriesDocs] = await Promise.all([
       fetchProfiles(),
       fetchVesselAccesses(),
       fetchVessels(),
       fetchStudies(CLOUD_STUDY_DEFAULTS),
       fetchApprovedSisterReferenceVesselIds(),
+      fetchShipSeries(),
+      fetchSeriesDocuments(),
     ]);
     const loadedVessels = cloudVessels as Vessel[];
     const vesselMap = new Map(loadedVessels.map(vessel => [vessel.id, vessel]));
@@ -1322,6 +1373,8 @@ export default function App() {
     setVesselAccesses(cloudVesselAccesses);
     setVessels(loadedVessels);
     setApprovedSisterReferenceVesselIds(cloudApprovedReferenceVesselIds);
+    setShipSeries(cloudShipSeries);
+    setSeriesDocs(cloudSeriesDocs);
     setStudies((cloudStudies as SSCSStudy[]).map(study => withCanonicalVesselIdentity(study, vesselMap.get(study.vesselId))));
   }
 
@@ -3140,6 +3193,62 @@ setPage("study");
               <div key={label} className="border border-border rounded bg-card p-4"><div className="flex items-center gap-2 mb-2"><Icon className={`w-4 h-4 ${c}`} /><span className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest">{label}</span></div><p className={`font-mono text-2xl font-bold ${c}`}>{n}</p></div>
             ))}
           </div>
+          {/* Ship Series Management: independent of sister-ship study approval. */}
+          <div className="border border-border rounded bg-card mb-8 overflow-hidden">
+            <div className="px-5 py-4 bg-secondary/50 border-b border-border flex items-center justify-between gap-3">
+              <div><p className="font-mono text-sm font-semibold text-foreground">SHIP SERIES MANAGEMENT</p>
+                <p className="text-xs text-muted-foreground mt-1">One shared document set per series. Vessel-specific and approved Study documents remain untouched.</p></div>
+              <span className="font-mono text-xs text-primary">{shipSeries.length} series</span>
+            </div>
+            <div className="p-5 space-y-5">
+              {seriesError && <p role="alert" className="text-xs text-red-400">{seriesError}</p>}
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input aria-label="New series name" placeholder="New ship series name" value={seriesNameInput} onChange={e => setSeriesNameInput(e.target.value)} className="flex-1 min-w-0 rounded border border-border bg-background p-2 text-sm" />
+                <select aria-label="Representative vessel" value={seriesRepresentativeId ?? ''} onChange={e => setSeriesRepresentativeId(Number(e.target.value) || null)} className="flex-1 min-w-0 rounded border border-border bg-background p-2 text-sm">
+                  <option value="">Representative vessel...</option>
+                  {vessels.filter(v => !seriesForVessel(v.id)).map(v => <option key={v.id} value={v.id}>{v.name} · {v.imo}</option>)}
+                </select>
+                <button type="button" disabled={seriesBusy || !seriesNameInput.trim() || !seriesRepresentativeId || !supabaseConfigured} onClick={() => void runSeriesAction(async () => {
+                  await createShipSeries({ name: seriesNameInput, representativeVesselId: seriesRepresentativeId! });
+                  setSeriesNameInput(''); setSeriesRepresentativeId(null);
+                }, 'Ship series created.')} className="px-3 py-2 text-xs font-mono text-primary border border-primary/30 rounded disabled:opacity-40"><Plus className="w-3.5 h-3.5 inline mr-1"/>Create Series</button>
+              </div>
+              {shipSeries.length === 0 && <p className="text-xs text-muted-foreground">No ship series yet. Create one using a representative vessel above.</p>}
+              <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-4">
+                <div className="space-y-2 max-h-80 overflow-y-auto">
+                  {shipSeries.map(s => <button type="button" key={s.id} onClick={() => { setSelectedSeriesId(s.id); setSeriesError(''); }} className={`w-full text-left p-3 rounded border ${selectedSeriesId === s.id ? 'border-primary bg-primary/5' : 'border-border hover:bg-secondary'}`}>
+                    <p className="text-sm font-semibold">{s.name}</p><p className="text-[11px] text-muted-foreground">Main: {vessels.find(v => v.id === s.representativeVesselId)?.name ?? 'Unknown'} · {s.members.length} vessels</p>
+                  </button>)}
+                </div>
+                {(() => {
+                  const series = shipSeries.find(s => s.id === selectedSeriesId);
+                  if (!series) return <p className="text-xs text-muted-foreground p-3">Select a series to manage sister ships and shared documents.</p>;
+                  const eligible = vessels.filter(v => v.id !== series.representativeVesselId && (series.members.includes(v.id) || !seriesForVessel(v.id)))
+                    .filter(v => [v.name,v.imo].some(x => x.toLowerCase().includes(seriesMemberSearch.toLowerCase()))).slice(0,60);
+                  return <div className="border border-border rounded p-4 space-y-4">
+                    <div><p className="text-sm font-semibold">{series.name}</p><p className="text-xs text-muted-foreground">Representative: {vessels.find(v => v.id === series.representativeVesselId)?.name} · IMO {vessels.find(v => v.id === series.representativeVesselId)?.imo}</p></div>
+                    <div className="space-y-2"><p className="text-xs font-mono font-semibold">SISTER SHIPS ({Math.max(series.members.length - 1,0)})</p>
+                      <input placeholder="Search vessels by name or IMO" value={seriesMemberSearch} onChange={e => setSeriesMemberSearch(e.target.value)} className="w-full rounded border border-border bg-background p-2 text-xs" />
+                      <div className="max-h-44 overflow-y-auto space-y-1">{eligible.map(v => <label key={v.id} className="flex items-center gap-2 px-2 py-1 text-xs hover:bg-secondary rounded"><input type="checkbox" disabled={seriesBusy} checked={series.members.includes(v.id)} onChange={e => void runSeriesAction(() => updateShipSeriesMembers(series.id, e.target.checked ? [...series.members,v.id] : series.members.filter(id => id !== v.id)), e.target.checked ? 'Sister ship added.' : 'Sister ship removed.')} />{v.name} · {v.imo}</label>)}</div>
+                    </div>
+                    <div className="border-t border-border pt-3 space-y-2"><p className="text-xs font-mono font-semibold">SERIES SHARED DOCUMENTS</p>
+                      <p className="text-[11px] text-muted-foreground">Drawing 2.1–2.5, Manual 3.x, Optimoor 4.x only. File is stored once. Certificates and item 2.6 are vessel-specific.</p>
+                      <div className="flex gap-2"><select aria-label="Shared document type" value={seriesUploadKey} onChange={e => setSeriesUploadKey(e.target.value as DocKey)} className="flex-1 min-w-0 rounded border border-border bg-background p-2 text-xs">
+                        {SERIES_SHARED_DOC_KEYS.map(k => <option key={k} value={k}>{k.replace('d_','').replace('_','.')}</option>)}
+                      </select><input ref={seriesFileInput} type="file" className="hidden" onChange={e => void handleSeriesFileSelected(e)} />
+                      <button type="button" disabled={seriesBusy} onClick={() => seriesFileInput.current?.click()} className="px-3 border border-primary/40 rounded text-primary text-xs"><Upload className="w-3 h-3 inline mr-1"/>Upload</button></div>
+                      {seriesDocs.filter(d => d.seriesId === series.id).map(d => <div key={d.id} className="flex gap-2 items-center text-[11px] border border-border rounded p-2">
+                        <span className="text-muted-foreground shrink-0">{d.docKey.replace('d_','').replace('_','.')}</span><span className="truncate flex-1" title={d.name}>{d.name}</span>
+                        <button onClick={() => void getStudyDocumentUrl(d.storagePath!).then(url => window.open(url,'_blank','noopener,noreferrer')).catch(err => setSeriesError(String(err)))} title="Open shared file"><Download className="w-3.5 h-3.5"/></button>
+                        <button disabled={seriesBusy} onClick={() => askConfirmation('Unlink shared file', `Remove ${d.name} from this series? Storage file is retained.`, () => runSeriesAction(() => unlinkSeriesDocument(d.id), 'Shared document unlinked.'))} title="Unlink from series"><X className="w-3.5 h-3.5 text-red-400"/></button>
+                      </div>)}
+                    </div>
+                  </div>;
+                })()}
+              </div>
+            </div>
+          </div>
+
           <div className="border border-border rounded bg-card mb-8 overflow-hidden">
             <div className="flex items-center justify-between gap-4 px-5 py-4 bg-secondary/50 border-b border-border">
               <div>
@@ -4950,7 +5059,7 @@ setPage("study");
                 );
 
                 const isComplete = isReqDocsTab
-                  ? isRequiredDocumentsComplete(activeStudy.requiredDocuments, Boolean(vessel?.isSisterShip))
+                  ? isRequiredDocumentsComplete(activeStudy.requiredDocuments, Boolean(vessel?.isSisterShip), vessel ? sharedDocsForVessel(vessel.id) : {})
                   : isAttachmentTab
                   ? isAttachmentComplete(activeStudy.attachmentData)
                   : isQualityTab
@@ -5019,6 +5128,8 @@ setPage("study");
                   sisterShipVerified={verifiedSisterShip}
                   referenceVesselName={referenceVessel?.name}
                   inheritedKeys={verifiedSisterShip ? SISTER_BORROWED_DOC_KEYS : []}
+                  seriesDocuments={vessel ? sharedDocsForVessel(vessel.id) : {}}
+                  seriesName={vessel ? seriesForVessel(vessel.id)?.name : undefined}
                 />
               );
             }

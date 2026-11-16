@@ -812,3 +812,80 @@ export async function deleteStudyDocument(file: CloudUploadedFile) {
   if (storageError) throw storageError;
   if (metadataError) throw metadataError;
 }
+
+
+// Ship Series are independent of the legacy sister-ship verification/approval workflow.
+export type ShipSeries = { id: string; name: string; representativeVesselId: number; notes: string; members: number[] };
+export type SeriesDocument = CloudUploadedFile & { seriesId: string; docKey: string };
+
+export async function fetchShipSeries(): Promise<ShipSeries[]> {
+  const client = requireSupabase();
+  const [{ data: groups, error: groupError }, { data: members, error: memberError }] = await Promise.all([
+    client.from('ship_series').select('id,name,representative_vessel_id,notes').order('name'),
+    client.from('ship_series_members').select('series_id,vessel_id'),
+  ]);
+  if (groupError) throw groupError;
+  if (memberError) throw memberError;
+  return (groups ?? []).map((g: any) => ({
+    id: g.id, name: g.name, representativeVesselId: Number(g.representative_vessel_id),
+    notes: g.notes ?? '',
+    members: (members ?? []).filter((m: any) => m.series_id === g.id).map((m: any) => Number(m.vessel_id)),
+  }));
+}
+
+export async function createShipSeries(opts: { name: string; representativeVesselId: number; notes?: string }): Promise<void> {
+  const { error } = await requireSupabase().rpc('admin_create_ship_series', {
+    p_name: opts.name.trim(), p_representative_vessel_id: opts.representativeVesselId,
+    p_notes: opts.notes?.trim() ?? '',
+  });
+  if (error) throw error;
+}
+
+export async function updateShipSeriesMembers(seriesId: string, vesselIds: number[]): Promise<void> {
+  const { error } = await requireSupabase().rpc('admin_set_ship_series_members', {
+    p_series_id: seriesId, p_vessel_ids: vesselIds,
+  });
+  if (error) throw error;
+}
+
+export async function renameShipSeries(seriesId: string, name: string, notes: string): Promise<void> {
+  const { error } = await requireSupabase().from('ship_series')
+    .update({ name: name.trim(), notes: notes.trim() }).eq('id', seriesId);
+  if (error) throw error;
+}
+
+export async function fetchSeriesDocuments(): Promise<SeriesDocument[]> {
+  const { data, error } = await requireSupabase().from('ship_series_documents')
+    .select('id,series_id,doc_key,file_name,file_size,mime_type,storage_path,created_at')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((d: any) => ({
+    id: d.id, seriesId: d.series_id, docKey: d.doc_key, name: d.file_name,
+    size: d.file_size ?? 0, type: d.mime_type ?? '', uploadedAt: d.created_at,
+    storagePath: d.storage_path,
+  }));
+}
+
+export async function uploadSeriesDocument(seriesId: string, docKey: string, file: File): Promise<void> {
+  const client = requireSupabase();
+  const id = crypto.randomUUID();
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]+/g, '_');
+  const path = `ship-series/${seriesId}/${docKey}/${id}-${safeName}`;
+  const { error: uploadError } = await client.storage.from('sscs-documents')
+    .upload(path, file, { upsert: false, contentType: file.type || undefined });
+  if (uploadError) throw uploadError;
+  const { error } = await client.from('ship_series_documents').insert({
+    id, series_id: seriesId, doc_key: docKey, file_name: file.name,
+    file_size: file.size, mime_type: file.type || null, storage_path: path,
+  });
+  if (error) {
+    await client.storage.from('sscs-documents').remove([path]);
+    throw error;
+  }
+}
+
+// Remove only the reference; the original Storage blob is deliberately retained for audit.
+export async function unlinkSeriesDocument(id: string): Promise<void> {
+  const { error } = await requireSupabase().from('ship_series_documents').delete().eq('id', id);
+  if (error) throw error;
+}
