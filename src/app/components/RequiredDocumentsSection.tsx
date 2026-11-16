@@ -54,10 +54,10 @@ export function defaultRequiredDocumentsData(): RequiredDocumentsData {
   };
 }
 
-export function isRequiredDocumentsComplete(data: RequiredDocumentsData | undefined, sisterShip = false): boolean {
+export function isRequiredDocumentsComplete(data: RequiredDocumentsData | undefined, sisterShip = false, seriesDocuments: Partial<Record<DocKey, UploadedFile[]>> = {}): boolean {
   const d = data ?? defaultRequiredDocumentsData();
   const required = sisterShip ? [...BASE_KEYS, "d_6_1" as DocKey] : BASE_KEYS;
-  return required.every(k => (d[k]?.length ?? 0) > 0);
+  return required.every(k => (d[k]?.length ?? 0) > 0 || (seriesDocuments[k]?.length ?? 0) > 0);
 }
 
 // ─── Document catalogue ───────────────────────────────────────────────────────
@@ -155,12 +155,14 @@ interface Props {
   inheritedKeys?: DocKey[];
   canUpdateInherited?: boolean;
   onReplaceInheritedFile?: (docKey: DocKey, file: File) => Promise<UploadedFile[]>;
+  seriesDocuments?: Partial<Record<DocKey, UploadedFile[]>>;
+  seriesName?: string;
 }
 
 export function RequiredDocumentsSection({
   canEdit, data: dp, onChange, onUploadFile, onDeleteFile, getDownloadUrl,
   sisterShip = false, sisterShipVerified = false, referenceVesselName, inheritedKeys = [],
-  canUpdateInherited = false, onReplaceInheritedFile,
+  canUpdateInherited = false, onReplaceInheritedFile, seriesDocuments = {}, seriesName,
 }: Props) {
   const data = dp ?? defaultRequiredDocumentsData();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -257,9 +259,10 @@ export function RequiredDocumentsSection({
   // updated later when new sister-ship relationships are established.
   const visibleKeys = ALL_KEYS;
   const requiredKeys = sisterShip ? [...BASE_KEYS, "d_6_1" as DocKey] : BASE_KEYS;
-  const totalUploaded = visibleKeys.reduce((n, k) => n + (data[k]?.length ?? 0), 0);
+  const filesFor = (key: DocKey) => (data[key]?.length ? data[key] : (seriesDocuments[key] ?? []));
+  const totalUploaded = visibleKeys.reduce((n, k) => n + filesFor(k).length, 0);
   const totalRequired = requiredKeys.length;
-  const slotsWithFile = requiredKeys.filter(k => (data[k]?.length ?? 0) > 0).length;
+  const slotsWithFile = requiredKeys.filter(k => filesFor(k).length > 0).length;
   const inherited = new Set(inheritedKeys);
 
   return (
@@ -313,7 +316,8 @@ export function RequiredDocumentsSection({
               {/* Document rows */}
               <div className="border border-border rounded overflow-hidden divide-y divide-border">
                 {group.items.map(({ key, num, label }) => {
-                  const files = data[key] ?? [];
+                  const usesSeries = !(data[key]?.length) && (seriesDocuments[key]?.length ?? 0) > 0;
+                  const files = filesFor(key);
                   const hasFiles = files.length > 0;
                   const isNotApplicable = key === "d_7_3" && Boolean(data.notApplicable?.[key]);
                   const isInherited = sisterShipVerified && inherited.has(key);
@@ -335,6 +339,9 @@ export function RequiredDocumentsSection({
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 mb-1.5 flex-wrap">
                             <p className="font-mono text-xs text-foreground font-semibold">{label}</p>
+                            {usesSeries && (
+                              <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-emerald-500/25 bg-emerald-500/8 text-emerald-400">Shared · {seriesName || 'Ship Series'}</span>
+                            )}
                             {isInherited && (
                               <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-sky-500/25 bg-sky-500/8 text-sky-400">
                                 From {referenceVesselName || "reference ship"}
@@ -380,7 +387,7 @@ export function RequiredDocumentsSection({
                                     className="text-muted-foreground hover:text-primary transition-colors shrink-0">
                                     <Download className="w-3 h-3" />
                                   </button>
-                                  {canEdit && !isLocked && (
+                                  {canEdit && !isLocked && !usesSeries && (
                                     <button
                                       onClick={() => removeFile(key, file.id)}
                                       title="Remove"
@@ -394,7 +401,7 @@ export function RequiredDocumentsSection({
                           )}
 
                           {/* Upload button */}
-                          {canEdit && !isLocked && !isNotApplicable && (
+                          {canEdit && !isLocked && !isNotApplicable && !usesSeries && (
                             <button
                               onClick={() => triggerUpload(key)}
                               disabled={loading}
