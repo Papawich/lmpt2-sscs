@@ -64,6 +64,8 @@ import {
   fetchRepresentativeApprovedDocuments, linkExistingSeriesDocument, linkAvailableRepresentativeDocuments, linkConfirmedSeriesStatement,
 } from "./backendService";
 import type { ShipSeries, SeriesDocument, RepresentativeDocument } from "./backendService";
+import { SERIES_PHYSICAL_PARTS, previewPhysicalMerge, copyIntroducedMedia, countPhysicalChanges } from "./seriesPhysicalData";
+import type { PhysicalPart } from "./seriesPhysicalData";
 import type { CloudPasswordResetRequest, CloudVesselAccess } from "./backendService";
 import { generateApprovalDocuments } from "./approvalDocumentService";
 import {
@@ -1184,6 +1186,11 @@ export default function App() {
   const [seriesError, setSeriesError] = useState('');
   const [seriesUploadKey, setSeriesUploadKey] = useState<DocKey>('d_2_1');
   const [seriesStatementConfirmed, setSeriesStatementConfirmed] = useState(false);
+  // V5 draft-only Physical Information prefill, independent of formal Sister Ship verification.
+  const [physicalTargetId, setPhysicalTargetId] = useState<number | 'all'>('all');
+  const [physicalParts, setPhysicalParts] = useState<PhysicalPart[]>(SERIES_PHYSICAL_PARTS.map(x => x.key));
+  const [physicalConfirmed, setPhysicalConfirmed] = useState(false);
+  const [physicalPreviewOpen, setPhysicalPreviewOpen] = useState(false);
   const seriesFileInput = useRef<HTMLInputElement>(null);
 
   const [passwordResetRequests, setPasswordResetRequests] = useState<CloudPasswordResetRequest[]>([]);
@@ -1373,6 +1380,69 @@ export default function App() {
       .finally(() => { if (!cancelled) setReferenceDocsLoading(false); });
     return () => { cancelled = true; };
   }, [selectedSeriesId, shipSeries]);
+
+  async function applySeriesPhysicalDrafts(series: ShipSeries) {
+    if (!currentUser?.isAdmin || seriesBusy || !physicalConfirmed || physicalParts.length === 0)
+      throw new Error('Select physical sections and confirm before applying.');
+    if (!supabaseConfigured) throw new Error('Cloud connection is required.');
+    const source = getLatestApprovedStudy(studies, series.representativeVesselId)
+      ?? getLatestStudy(studies, series.representativeVesselId);
+    if (!source) throw new Error('The representative vessel has no Study to reference.');
+    const targets = series.members.filter(id => id !== series.representativeVesselId)
+      .filter(id => physicalTargetId === 'all' || physicalTargetId === id)
+      .map(id => getLatestStudy(studies, id))
+      .filter((study): study is SSCSStudy => Boolean(study && study.status === 'draft'));
+    if (!targets.length) throw new Error('No eligible Draft Study. New placeholder vessels need a Study before prefill.');
+    if (source.status !== 'approved' && !window.confirm(
+      `Reference ${source.vesselName} is ${source.status.toUpperCase()}, not APPROVED.\nContinue using its unapproved physical data?`
+    )) return;
+    if (!window.confirm(
+      `Prefill ${physicalParts.length} physical-data section(s) for ${targets.length} DRAFT Study(ies) from ${source.vesselName}?\nExisting nonempty values will be preserved. Existing Approved/Submitted studies will not be changed.\nMedia files will be copied automatically to each target Study for Storage access.`
+    )) return;
+    setSeriesBusy(true); setSeriesError('');
+    let completed = 0;
+    try {
+      for (const target of targets) {
+        const merged = previewPhysicalMerge(target, source, physicalParts) as SSCSStudy;
+        const newMedia: UploadedFile[] = [];
+        try {
+          const withMedia = await copyIntroducedMedia(target, merged, async (media, path) => {
+          const signed = await getStudyDocumentUrl(media.storagePath);
+          const response = await fetch(signed);
+          if (!response.ok) throw new Error(`Cannot read reference media: ${media.name}`);
+          const blob = await response.blob();
+          const originalKey = media.storagePath.split('/')[1] || '';
+          // Preserve the known document type where available, so current Storage RLS applies.
+          if (!/^[a-z0-9_]+$/.test(originalKey))
+            throw new Error(`Unsupported reference media storage key (${path}).`);
+          const uploaded = await uploadStudyDocument({
+            studyId: target.id, docKey: originalKey,
+            file: new File([blob], media.name, { type: media.type || blob.type || 'application/octet-stream' }),
+            userId: currentUser.id,
+          });
+          newMedia.push(uploaded);
+          return uploaded;
+          });
+          // Save through the normal draft-only Study persistence path and its existing RLS.
+          await saveCloudStudy(withMedia, currentUser.id);
+          setStudies(prev => prev.map(s => s.id === target.id ? withMedia : s));
+          if (activeStudy?.id === target.id) setActiveStudy(withMedia);
+          completed++;
+        } catch (error) {
+          // Remove only new media from this unsuccessful target; original files stay intact.
+          for (const file of newMedia) {
+            try { await deleteStudyDocument(file); }
+            catch (cleanupError) { console.error('[V5 media cleanup failed]', cleanupError); }
+          }
+          throw error;
+        }
+      }
+      showToast(`${completed} Draft Study(ies) prefilled with physical reference data. Review before submission.`, 'success');
+      setPhysicalConfirmed(false);
+    } catch (err) {
+      setSeriesError(`Physical prefill stopped after ${completed} Study(ies): ${err instanceof Error ? err.message : String(err)}`);
+    } finally { setSeriesBusy(false); }
+  }
 
   async function handleSeriesFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -3249,7 +3319,7 @@ setPage("study");
               {shipSeries.length === 0 && <p className="text-xs text-muted-foreground">No ship series yet. Create one using a representative vessel above.</p>}
               <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-4">
                 <div className="space-y-2 max-h-80 overflow-y-auto">
-                  {shipSeries.map(s => <button type="button" key={s.id} onClick={() => { setSelectedSeriesId(s.id); setSeriesError(''); setSeriesStatementConfirmed(false); setSelectedReferenceDocId(''); }} className={`w-full text-left p-3 rounded border ${selectedSeriesId === s.id ? 'border-primary bg-primary/5' : 'border-border hover:bg-secondary'}`}>
+                  {shipSeries.map(s => <button type="button" key={s.id} onClick={() => { setSelectedSeriesId(s.id); setSeriesError(''); setSeriesStatementConfirmed(false); setPhysicalConfirmed(false); setPhysicalTargetId('all'); setPhysicalPreviewOpen(false); setSelectedReferenceDocId(''); }} className={`w-full text-left p-3 rounded border ${selectedSeriesId === s.id ? 'border-primary bg-primary/5' : 'border-border hover:bg-secondary'}`}>
                     <p className="text-sm font-semibold">{s.name}</p><p className="text-[11px] text-muted-foreground">Main: {vessels.find(v => v.id === s.representativeVesselId)?.name ?? 'Unknown'} · {s.members.length} vessels</p>
                   </button>)}
                 </div>
@@ -3310,6 +3380,44 @@ setPage("study");
                           </div>)}
                         </div>
                       )}
+                    </div>
+                    {/* V5: Previewable, opt-in draft-only physical information inheritance. */}
+                    <div className="border-t border-border pt-4 space-y-3">
+                      <p className="text-xs font-mono font-semibold">SERIES PHYSICAL DATA · DRAFT PREFILL (V5)</p>
+                      <p className="text-[11px] text-muted-foreground">Use physical values from the representative vessel for an existing Draft Study. Existing vessel values stay unchanged. Uploaded images (including mooring pattern) are copied automatically into the target Study to preserve private Storage access; this is a one-time snapshot, not automatic live sync. Approved and Submitted Studies are never modified.</p>
+                      {(() => {
+                        const source = getLatestApprovedStudy(studies, series.representativeVesselId)
+                          ?? getLatestStudy(studies, series.representativeVesselId);
+                        const eligible = series.members.filter(id => id !== series.representativeVesselId)
+                          .map(id => ({vessel: vessels.find(v => v.id === id), study: getLatestStudy(studies, id)}));
+                        const draftCount = eligible.filter(row => row.study?.status === 'draft').length;
+                        return <div className="space-y-2">
+                          <p className="text-[11px]">Reference: <strong>{source?.vesselName ?? 'No Study available'}</strong> {source ? `(${source.status})` : ''} · {draftCount} eligible Draft Study(ies)</p>
+                          <select value={physicalTargetId} onChange={e => { setPhysicalTargetId(e.target.value === 'all' ? 'all' : Number(e.target.value)); setPhysicalConfirmed(false); }} aria-label="Physical data target" className="w-full rounded border border-border bg-background p-2 text-xs">
+                            <option value="all">All eligible Draft Sister Ships</option>
+                            {eligible.map(({vessel,study}) => <option key={vessel?.id} value={vessel?.id} disabled={study?.status !== 'draft'}>{vessel?.name ?? 'Unknown'} — {study?.status ?? 'No Study'}</option>)}
+                          </select>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            {SERIES_PHYSICAL_PARTS.map(part => <label key={part.key} className="flex gap-2 items-start text-[11px] border border-border rounded px-2 py-2 cursor-pointer">
+                              <input type="checkbox" checked={physicalParts.includes(part.key)} onChange={e => { setPhysicalParts(prev => e.target.checked ? [...prev,part.key] : prev.filter(k => k !== part.key)); setPhysicalConfirmed(false); }} className="mt-0.5" />{part.label}
+                            </label>)}
+                          </div>
+                          <button type="button" disabled={!source || !physicalParts.length} onClick={() => setPhysicalPreviewOpen(p => !p)} className="rounded border border-border px-3 py-2 text-xs hover:bg-secondary disabled:opacity-40">{physicalPreviewOpen ? 'Hide' : 'Preview'} Changes by Sister Ship</button>
+                          {physicalPreviewOpen && source && (
+                            <div className="max-h-48 overflow-y-auto rounded border border-border divide-y divide-border text-[11px]">
+                              {eligible.filter(x => x.study?.status === 'draft' && (physicalTargetId === 'all' || physicalTargetId === x.vessel?.id)).map(({vessel,study}) => {
+                                const merged = previewPhysicalMerge(study!, source, physicalParts);
+                                const count = countPhysicalChanges(study, merged);
+                                return <div key={vessel?.id} className="flex justify-between gap-2 p-2"><span>{vessel?.name}</span><span className="font-semibold">{count} new/filled values</span></div>;
+                              })}
+                              <p className="p-2 text-muted-foreground">Counts include media metadata. No changes are made during preview. Existing values are kept.</p>
+                            </div>
+                          )}
+                          <p className="text-[11px] text-amber-500">Check the reference data and each sister ship’s technical differences before applying. This action does not verify Sister Ships or approve Studies. Draft overrides remain possible.</p>
+                          <label className="flex items-start gap-2 text-[11px] cursor-pointer"><input type="checkbox" checked={physicalConfirmed} onChange={e => setPhysicalConfirmed(e.target.checked)} />I reviewed the physical-data applicability for these vessels and understand this is a draft snapshot.</label>
+                          <button type="button" disabled={seriesBusy || !source || draftCount === 0 || !physicalConfirmed || physicalParts.length===0} onClick={() => void applySeriesPhysicalDrafts(series)} className="rounded border border-primary px-3 py-2 text-xs font-semibold text-primary disabled:opacity-40">Apply Physical Data to Draft Study</button>
+                        </div>;
+                      })()}
                     </div>
                     <div className="border-t border-border pt-3 space-y-3"><p className="text-xs font-mono font-semibold">SERIES SHARED DOCUMENTS</p>
                       <p className="text-[11px] text-muted-foreground">Link approved documents from the representative vessel without re-uploading, or upload a new version. Each Study retains its own documents. Shared files are read-only in the Study.</p>
