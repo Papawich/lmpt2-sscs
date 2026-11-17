@@ -282,6 +282,17 @@ interface FixedDateInputProps {
 
 function FixedDateInput({ value, canEdit, onChange, invalid = false }: FixedDateInputProps) {
   const normalized = normalizeDateValue(value);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Keep the browser's date segments intact while the user is typing.
+  // Native date inputs temporarily report an empty value for incomplete dates;
+  // treating that as a controlled React value resets the day/month segments.
+  useEffect(() => {
+    const input = inputRef.current;
+    if (input && document.activeElement !== input && input.value !== normalized) {
+      input.value = normalized;
+    }
+  }, [normalized, canEdit]);
 
   if (!canEdit) {
     return <span className={readOnlyClass}>{formatDisplayDate(value)}</span>;
@@ -289,9 +300,22 @@ function FixedDateInput({ value, canEdit, onChange, invalid = false }: FixedDate
 
   return (
     <input
+      ref={inputRef}
       type="date"
-      value={normalized}
-      onChange={event => onChange(event.target.value)}
+      defaultValue={normalized}
+      onChange={event => {
+        const entered = event.currentTarget.value;
+        // Only save complete calendar dates, not an unfinished edit.
+        if (entered && normalizeDateValue(entered) === entered && entered !== normalized) {
+          onChange(entered);
+        }
+      }}
+      onBlur={event => {
+        // A genuinely cleared field is saved on blur; an incomplete date is not.
+        if (!event.currentTarget.value && !event.currentTarget.validity.badInput && normalized) {
+          onChange("");
+        }
+      }}
       className={
         inputClass +
         (invalid
