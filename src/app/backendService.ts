@@ -118,7 +118,8 @@ function vesselFromRow(row: any): AnyVessel {
   return {
     id: Number(row.id),
     name: row.name,
-    imo: row.imo,
+    imo: row.imo ?? "",
+    isPlaceholder: Boolean(row.is_placeholder),
     callSign: row.call_sign ?? "—",
     flag: row.flag ?? "—",
     portOfRegistry: row.port_of_registry ?? "—",
@@ -145,7 +146,7 @@ function vesselToRow(vessel: AnyVessel) {
   return {
     ...(vessel.id ? { id: vessel.id } : {}),
     name: vessel.name,
-    imo: vessel.imo,
+    imo: vessel.imo || null,
     call_sign: vessel.callSign || null,
     flag: vessel.flag || null,
     port_of_registry: vessel.portOfRegistry || null,
@@ -849,6 +850,27 @@ export async function updateShipSeriesMembers(seriesId: string, vesselIds: numbe
   if (error) throw error;
 }
 
+
+/** Admin-only atomic import. Existing vessels are reused by IMO / normalized name. */
+export async function importShipSeriesVessels(seriesId: string, rows: Array<{name:string;imo?:string}>): Promise<void> {
+  if (!rows.length) throw new Error('Enter at least one vessel.');
+  const { error } = await requireSupabase().rpc('admin_import_ship_series_vessels', {
+    p_series_id: seriesId, p_rows: rows,
+  });
+  if (error) throw error;
+}
+
+/** Fills an incomplete vessel without creating or modifying its Study. */
+export async function completeSeriesPlaceholderVessel(vesselId: number, details: {
+  imo:string;flag:string;capacity:string;yearBuilt:number;
+}): Promise<void> {
+  const { error } = await requireSupabase().rpc('admin_complete_series_placeholder_vessel', {
+    p_vessel_id: vesselId, p_imo: details.imo, p_flag: details.flag,
+    p_capacity: details.capacity, p_year_built: details.yearBuilt,
+  });
+  if (error) throw error;
+}
+
 export async function renameShipSeries(seriesId: string, name: string, notes: string): Promise<void> {
   const { error } = await requireSupabase().from('ship_series')
     .update({ name: name.trim(), notes: notes.trim() }).eq('id', seriesId);
@@ -867,7 +889,8 @@ export async function fetchSeriesDocuments(): Promise<SeriesDocument[]> {
   }));
 }
 
-export async function uploadSeriesDocument(seriesId: string, docKey: string, file: File): Promise<void> {
+export async function uploadSeriesDocument(seriesId: string, docKey: string, file: File, statementConfirmed = false): Promise<void> {
+  if (docKey === 'd_6_1' && !statementConfirmed) throw new Error('Admin must confirm the statement covers the series before upload.');
   const client = requireSupabase();
   const id = crypto.randomUUID();
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]+/g, '_');
@@ -878,6 +901,7 @@ export async function uploadSeriesDocument(seriesId: string, docKey: string, fil
   const { error } = await client.from('ship_series_documents').insert({
     id, series_id: seriesId, doc_key: docKey, file_name: file.name,
     file_size: file.size, mime_type: file.type || null, storage_path: path,
+    ...(docKey === 'd_6_1' ? { statement_coverage_confirmed: statementConfirmed } : {}),
   });
   if (error) {
     await client.storage.from('sscs-documents').remove([path]);
@@ -893,7 +917,7 @@ export async function unlinkSeriesDocument(id: string): Promise<void> {
 
 // Reuse an existing document from an APPROVED study of the series representative.
 // No storage copies, no updates to old approved studies.
-const APPROVED_SERIES_DOC_KEYS = ["d_2_1","d_2_2","d_2_3","d_2_4","d_2_5","d_3_1","d_3_2","d_3_3","d_3_4","d_4_1","d_4_2"];
+const APPROVED_SERIES_DOC_KEYS = ["d_2_1","d_2_2","d_2_3","d_2_4","d_2_5","d_3_1","d_3_2","d_3_3","d_3_4","d_4_1","d_4_2","d_6_1"];
 export async function fetchRepresentativeApprovedDocuments(representativeVesselId: number): Promise<RepresentativeDocument[]> {
   const client = requireSupabase();
   const { data: studies, error: studiesError } = await client.from('sscs_studies')
@@ -928,4 +952,13 @@ export async function linkAvailableRepresentativeDocuments(seriesId: string): Pr
   });
   if (error) throw error;
   return Number(data ?? 0);
+}
+
+/** 6.1 is deliberately excluded from bulk links: each Statement needs explicit Admin approval. */
+export async function linkConfirmedSeriesStatement(seriesId: string, documentId: string, confirmed: boolean): Promise<void> {
+  if (!confirmed) throw new Error('Confirm that this Sister Ship Statement covers all series members.');
+  const { error } = await requireSupabase().rpc('admin_link_confirmed_series_statement', {
+    p_series_id: seriesId, p_document_id: documentId, p_confirm_coverage: confirmed,
+  });
+  if (error) throw error;
 }

@@ -59,9 +59,9 @@ import {
   getStudyDocumentUrl,
   fetchApprovalDocuments,
   deleteStudyDocument,
-  fetchShipSeries, createShipSeries, updateShipSeriesMembers,
+  fetchShipSeries, createShipSeries, updateShipSeriesMembers, importShipSeriesVessels, completeSeriesPlaceholderVessel,
   renameShipSeries, fetchSeriesDocuments, uploadSeriesDocument, unlinkSeriesDocument,
-  fetchRepresentativeApprovedDocuments, linkExistingSeriesDocument, linkAvailableRepresentativeDocuments,
+  fetchRepresentativeApprovedDocuments, linkExistingSeriesDocument, linkAvailableRepresentativeDocuments, linkConfirmedSeriesStatement,
 } from "./backendService";
 import type { ShipSeries, SeriesDocument, RepresentativeDocument } from "./backendService";
 import type { CloudPasswordResetRequest, CloudVesselAccess } from "./backendService";
@@ -150,6 +150,7 @@ interface Vessel {
   sisterShipVerifiedById?: string;
   sisterShipVerifiedAt?: string;
   sisterReferenceStudyId?: string;
+  isPlaceholder?: boolean;
 }
 
 const INITIAL_VESSELS: Vessel[] = [
@@ -501,7 +502,7 @@ const SISTER_MAJOR_DIMENSION_IDS = new Set([
   "gi-20", "gi-21", "gi-22", "gi-23", "gi-24", "gi-25",
 ]);
 
-const SERIES_SHARED_DOC_KEYS: DocKey[] = ["d_2_1","d_2_2","d_2_3","d_2_4","d_2_5","d_3_1","d_3_2","d_3_3","d_3_4","d_4_1","d_4_2"];
+const SERIES_SHARED_DOC_KEYS: DocKey[] = ["d_2_1","d_2_2","d_2_3","d_2_4","d_2_5","d_3_1","d_3_2","d_3_3","d_3_4","d_4_1","d_4_2","d_6_1"];
 
 const SISTER_BORROWED_DOC_KEYS: DocKey[] = [
   "d_2_1", "d_2_2", "d_2_3", "d_2_4", "d_2_5",
@@ -1170,12 +1171,19 @@ export default function App() {
   const [seriesRepresentativeId, setSeriesRepresentativeId] = useState<number | null>(null);
   const [selectedSeriesId, setSelectedSeriesId] = useState<string | null>(null);
   const [seriesMemberSearch, setSeriesMemberSearch] = useState('');
+  const [seriesBulkInput, setSeriesBulkInput] = useState('');
+  const [seriesEditPlaceholderId, setSeriesEditPlaceholderId] = useState<number | null>(null);
+  const [seriesEditImo, setSeriesEditImo] = useState('');
+  const [seriesEditFlag, setSeriesEditFlag] = useState('');
+  const [seriesEditCapacity, setSeriesEditCapacity] = useState('');
+  const [seriesEditYear, setSeriesEditYear] = useState('');
   const [representativeDocs, setRepresentativeDocs] = useState<RepresentativeDocument[]>([]);
   const [selectedReferenceDocId, setSelectedReferenceDocId] = useState('');
   const [referenceDocsLoading, setReferenceDocsLoading] = useState(false);
   const [seriesBusy, setSeriesBusy] = useState(false);
   const [seriesError, setSeriesError] = useState('');
   const [seriesUploadKey, setSeriesUploadKey] = useState<DocKey>('d_2_1');
+  const [seriesStatementConfirmed, setSeriesStatementConfirmed] = useState(false);
   const seriesFileInput = useRef<HTMLInputElement>(null);
 
   const [passwordResetRequests, setPasswordResetRequests] = useState<CloudPasswordResetRequest[]>([]);
@@ -1330,6 +1338,7 @@ export default function App() {
   async function refreshSeries() {
     const [groups, docs] = await Promise.all([fetchShipSeries(), fetchSeriesDocuments()]);
     setShipSeries(groups); setSeriesDocs(docs);
+    setVessels(await fetchVessels() as Vessel[]);
   }
   async function runSeriesAction(action: () => Promise<void>, success: string) {
     if (!currentUser?.isAdmin || seriesBusy) return;
@@ -1369,7 +1378,13 @@ export default function App() {
     const file = e.target.files?.[0];
     const id = selectedSeriesId;
     if (!file || !id) return;
-    await runSeriesAction(() => uploadSeriesDocument(id, seriesUploadKey, file), 'Shared document uploaded.');
+    if (seriesUploadKey === 'd_6_1' && !seriesStatementConfirmed) {
+      setSeriesError('Confirm that the Sister Ship Statement covers all current series members before uploading.');
+      e.target.value = '';
+      return;
+    }
+    await runSeriesAction(() => uploadSeriesDocument(id, seriesUploadKey, file, seriesUploadKey === 'd_6_1' && seriesStatementConfirmed), 'Shared document uploaded.');
+    if (seriesUploadKey === 'd_6_1') setSeriesStatementConfirmed(false);
     e.target.value = '';
   }
 
@@ -2171,6 +2186,7 @@ if (study.status === "approved") {
 
   function initiateStudy(vessel: Vessel, fromExisting?: SSCSStudy, useApprovedVesselAccess = false) {
     if (!currentUser) return;
+    if (vessel.isPlaceholder) { showToast('Complete the vessel identity in Ship Series Management before initiating a Study.', 'error'); return; }
     let newStudy = blankStudy(vessel, currentUser, fromExisting, useApprovedVesselAccess ? "draft" : undefined);
 
     // A Terminal Officer who approved vessel access may own this active study cycle.
@@ -3223,7 +3239,7 @@ setPage("study");
                 <input aria-label="New series name" placeholder="New ship series name" value={seriesNameInput} onChange={e => setSeriesNameInput(e.target.value)} className="flex-1 min-w-0 rounded border border-border bg-background p-2 text-sm" />
                 <select aria-label="Representative vessel" value={seriesRepresentativeId ?? ''} onChange={e => setSeriesRepresentativeId(Number(e.target.value) || null)} className="flex-1 min-w-0 rounded border border-border bg-background p-2 text-sm">
                   <option value="">Representative vessel...</option>
-                  {vessels.filter(v => !seriesForVessel(v.id)).map(v => <option key={v.id} value={v.id}>{v.name} · {v.imo}</option>)}
+                  {vessels.filter(v => !seriesForVessel(v.id) && !v.isPlaceholder).map(v => <option key={v.id} value={v.id}>{v.name} · {v.imo}</option>)}
                 </select>
                 <button type="button" disabled={seriesBusy || !seriesNameInput.trim() || !seriesRepresentativeId || !supabaseConfigured} onClick={() => void runSeriesAction(async () => {
                   await createShipSeries({ name: seriesNameInput, representativeVesselId: seriesRepresentativeId! });
@@ -3233,7 +3249,7 @@ setPage("study");
               {shipSeries.length === 0 && <p className="text-xs text-muted-foreground">No ship series yet. Create one using a representative vessel above.</p>}
               <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-4">
                 <div className="space-y-2 max-h-80 overflow-y-auto">
-                  {shipSeries.map(s => <button type="button" key={s.id} onClick={() => { setSelectedSeriesId(s.id); setSeriesError(''); }} className={`w-full text-left p-3 rounded border ${selectedSeriesId === s.id ? 'border-primary bg-primary/5' : 'border-border hover:bg-secondary'}`}>
+                  {shipSeries.map(s => <button type="button" key={s.id} onClick={() => { setSelectedSeriesId(s.id); setSeriesError(''); setSeriesStatementConfirmed(false); setSelectedReferenceDocId(''); }} className={`w-full text-left p-3 rounded border ${selectedSeriesId === s.id ? 'border-primary bg-primary/5' : 'border-border hover:bg-secondary'}`}>
                     <p className="text-sm font-semibold">{s.name}</p><p className="text-[11px] text-muted-foreground">Main: {vessels.find(v => v.id === s.representativeVesselId)?.name ?? 'Unknown'} · {s.members.length} vessels</p>
                   </button>)}
                 </div>
@@ -3253,7 +3269,7 @@ setPage("study");
                       <div className="flex flex-nowrap items-center gap-2 overflow-x-auto rounded border border-primary/20 bg-primary/5 px-3 py-3 min-h-12">
                         {selectedSisters.length === 0 && <p className="text-xs text-muted-foreground">No sister ships selected yet.</p>}
                         {selectedSisters.map(v => <div key={v.id} className="inline-flex shrink-0 items-center gap-2 rounded-full border border-primary/40 bg-background px-3 py-1.5 text-xs font-mono whitespace-nowrap">
-                          <span className="truncate" title={`${v.name} · ${v.imo}`}>{v.name}</span>
+                          <span className="truncate" title={`${v.name} · ${v.imo}`}>{v.name}{v.isPlaceholder ? ' · Pending Details' : ''}</span>
                           <button type="button" disabled={seriesBusy} aria-label={`Remove ${v.name} from series`} title="Remove from series" className="text-muted-foreground hover:text-destructive disabled:opacity-50" onClick={() => void runSeriesAction(() => updateShipSeriesMembers(series.id, series.members.filter(id => id !== v.id)), `${v.name} removed from series.`)}><X className="w-3 h-3" /></button>
                         </div>)}
                       </div>
@@ -3263,23 +3279,61 @@ setPage("study");
                         {eligible.map(v => <button type="button" key={v.id} disabled={seriesBusy} onClick={() => void runSeriesAction(async () => { await updateShipSeriesMembers(series.id,[...series.members,v.id]); setSeriesMemberSearch(''); }, `${v.name} added to series.`)} className="w-full flex justify-between items-center gap-2 px-2 py-1.5 text-left text-xs hover:bg-secondary rounded disabled:opacity-50"><span>{v.name} · {v.imo}</span><Plus className="w-3.5 h-3.5 shrink-0" /></button>)}
                         {eligible.length === 0 && <p className="text-xs text-muted-foreground p-2">No unassigned matching vessels.</p>}
                       </div>
+                      <div className="rounded border border-sky-500/20 bg-sky-500/5 p-3 space-y-2">
+                        <p className="text-xs font-mono font-semibold text-sky-400">ADD MISSING SISTER SHIPS (BULK)</p>
+                        <p className="text-[11px] text-muted-foreground">One vessel per line: NAME, IMO (optional). Existing vessels are linked by IMO/name; missing vessels are created as Pending Details without a Study. Flag, capacity, year and IMO may be completed later. Review names carefully before saving.</p>
+                        <textarea aria-label="Bulk sister ship names and optional IMO" rows={4} value={seriesBulkInput} onChange={e => setSeriesBulkInput(e.target.value)} placeholder={'AL DAFNA, 9443683\nSHAGRA, 9418365\nZARGA, 9431214\nRASHEEDA, 9443413'} className="w-full rounded border border-border bg-background p-2 text-xs font-mono" />
+                        <button type="button" disabled={seriesBusy || !seriesBulkInput.trim()} onClick={() => void runSeriesAction(async () => {
+                          const rows = seriesBulkInput.split(/\r?\n/).filter(line => line.trim()).map(line => {
+                            const parts = line.split(/[,;|\t]/).map(p => p.trim());
+                            if (parts.length > 2 || !parts[0]) throw new Error('Use one vessel per line: NAME, IMO (optional).');
+                            return {name: parts[0], imo: parts[1] || undefined};
+                          });
+                          if (rows.length > 30) throw new Error('Maximum 30 vessels per operation.');
+                          await importShipSeriesVessels(series.id, rows);
+                          setSeriesBulkInput('');
+                        }, 'Sister ship list saved. Existing vessels reused; missing vessels registered as Pending Details.')} className="px-3 py-2 border border-sky-500/40 rounded text-sky-400 text-xs disabled:opacity-40"><Plus className="w-3.5 h-3.5 inline mr-1"/>Add / Link Listed Vessels</button>
+                      </div>
+                      {selectedSisters.filter(v => v.isPlaceholder).length > 0 && (
+                        <div className="space-y-2 rounded border border-amber-500/25 p-3">
+                          <p className="font-mono text-xs font-semibold text-amber-400">PENDING VESSEL DETAILS</p>
+                          {selectedSisters.filter(v => v.isPlaceholder).map(v => <div key={v.id} className="text-xs border border-border rounded p-2 space-y-2">
+                            <div className="flex justify-between gap-2 items-center"><span>{v.name} · {v.imo || 'IMO pending'}</span><button type="button" onClick={() => {setSeriesEditPlaceholderId(v.id);setSeriesEditImo(v.imo || '');setSeriesEditFlag(v.flag && v.flag !== '—' ? v.flag : '');setSeriesEditCapacity(v.capacity && v.capacity !== '—' ? v.capacity : '');setSeriesEditYear(v.year ? String(v.year) : '');}} className="text-sky-400 underline">Complete details</button></div>
+                            {seriesEditPlaceholderId === v.id && <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              <input placeholder="IMO (7 digits)" value={seriesEditImo} onChange={e => setSeriesEditImo(e.target.value)} className="bg-background border border-border rounded p-2" />
+                              <input placeholder="Flag" value={seriesEditFlag} onChange={e => setSeriesEditFlag(e.target.value)} className="bg-background border border-border rounded p-2" />
+                              <input placeholder="Capacity (e.g. 266,000 m³)" value={seriesEditCapacity} onChange={e => setSeriesEditCapacity(e.target.value)} className="bg-background border border-border rounded p-2" />
+                              <input placeholder="Year built (YYYY)" value={seriesEditYear} onChange={e => setSeriesEditYear(e.target.value)} className="bg-background border border-border rounded p-2" />
+                              <button type="button" disabled={seriesBusy || !/^\d{7}$/.test(seriesEditImo.trim()) || !seriesEditFlag.trim() || !seriesEditCapacity.trim() || !/^\d{4}$/.test(seriesEditYear)} onClick={() => void runSeriesAction(async () => { await completeSeriesPlaceholderVessel(v.id, {imo:seriesEditImo.trim(), flag:seriesEditFlag.trim(),capacity:seriesEditCapacity.trim(),yearBuilt:Number(seriesEditYear)}); setSeriesEditPlaceholderId(null); }, `${v.name} details completed.`)} className="border border-primary rounded px-3 py-2 text-primary disabled:opacity-40">Save vessel details</button>
+                              <button type="button" onClick={() => setSeriesEditPlaceholderId(null)} className="border border-border rounded px-3 py-2">Cancel</button>
+                            </div>}
+                          </div>)}
+                        </div>
+                      )}
                     </div>
                     <div className="border-t border-border pt-3 space-y-3"><p className="text-xs font-mono font-semibold">SERIES SHARED DOCUMENTS</p>
                       <p className="text-[11px] text-muted-foreground">Link approved documents from the representative vessel without re-uploading, or upload a new version. Each Study retains its own documents. Shared files are read-only in the Study.</p>
-                      <select aria-label="Shared document type" value={seriesUploadKey} onChange={e => { setSeriesUploadKey(e.target.value as DocKey); setSelectedReferenceDocId(''); }} className="w-full rounded border border-border bg-background p-2 text-xs">
-                        {SERIES_SHARED_DOC_KEYS.map(k => <option key={k} value={k}>{k.replace('d_','').replace('_','.')}</option>)}
+                      <select aria-label="Shared document type" value={seriesUploadKey} onChange={e => { setSeriesUploadKey(e.target.value as DocKey); setSelectedReferenceDocId(''); setSeriesStatementConfirmed(false); }} className="w-full rounded border border-border bg-background p-2 text-xs">
+                        {SERIES_SHARED_DOC_KEYS.map(k => <option key={k} value={k}>{k.replace('d_','').replace('_','.')} {k === 'd_6_1' ? '— Sister Ship Statement' : ''}</option>)}
                       </select>
+                      {seriesUploadKey === 'd_6_1' && (
+                        <label className="flex items-start gap-2 p-3 rounded border border-amber-500/30 bg-amber-500/5 text-xs text-foreground cursor-pointer">
+                          <input type="checkbox" checked={seriesStatementConfirmed} onChange={e => setSeriesStatementConfirmed(e.target.checked)} className="mt-0.5 accent-amber-500" />
+                          <span><strong>Admin confirmation — Sister Ship Statement 6.1</strong><br />
+                          I have checked that this statement explicitly covers the representative vessel and all current sister ships in this series. Linking or uploading does not formally verify sister-ship status or change approved Studies. Recheck this document when series membership changes.</span>
+                        </label>
+                      )}
                       <div className="rounded border border-sky-500/20 p-3 space-y-2">
                         <p className="text-xs font-semibold text-sky-400">Use existing approved reference document</p>
-                        <button type="button" disabled={seriesBusy || referenceDocsLoading || representativeDocs.length === 0} onClick={() => void runSeriesAction(async () => { const count = await linkAvailableRepresentativeDocuments(series.id); if (!count) throw new Error('No new approved representative documents are available to link. Existing shared slots were kept.'); }, 'Reference documents linked from the representative vessel without uploading.')} className="w-full rounded border border-sky-500/40 bg-sky-500/5 px-3 py-2 text-left text-xs text-sky-400 hover:bg-sky-500/10 disabled:opacity-40"><CheckCheck className="w-3.5 h-3.5 inline mr-1" />Use existing approved documents for all empty shared slots</button>
+                        <button type="button" disabled={seriesBusy || referenceDocsLoading || representativeDocs.length === 0} onClick={() => void runSeriesAction(async () => { const count = await linkAvailableRepresentativeDocuments(series.id); if (!count) throw new Error('No new approved representative documents are available to link. Existing shared slots were kept.'); }, 'Reference documents linked from the representative vessel without uploading.')} className="w-full rounded border border-sky-500/40 bg-sky-500/5 px-3 py-2 text-left text-xs text-sky-400 hover:bg-sky-500/10 disabled:opacity-40"><CheckCheck className="w-3.5 h-3.5 inline mr-1" />Use existing approved documents for all empty shared slots (excluding 6.1)</button>
                         <select aria-label="Existing approved representative document" value={selectedReferenceDocId} onChange={e => setSelectedReferenceDocId(e.target.value)} className="w-full min-w-0 rounded border border-border bg-background p-2 text-xs">
                           <option value="">{referenceDocsLoading ? 'Loading existing documents...' : availableReferences.length ? 'Select document to link...' : 'No unlinked approved files for this slot'}</option>
                           {availableReferences.map(d => <option key={d.id} value={d.id}>{d.name} · {d.studyId}</option>)}
                         </select>
-                        <button type="button" disabled={seriesBusy || !selectedReferenceDocId} onClick={() => void runSeriesAction(async () => { await linkExistingSeriesDocument(series.id, selectedReferenceDocId); setSelectedReferenceDocId(''); }, 'Existing approved file linked without re-upload.')} className="rounded border border-sky-500/40 px-3 py-2 text-xs text-sky-400 disabled:opacity-40"><FilePlus className="w-3.5 h-3.5 inline mr-1" />Link existing document</button>
+                        <button type="button" disabled={seriesBusy || !selectedReferenceDocId || (seriesUploadKey === 'd_6_1' && !seriesStatementConfirmed)} onClick={() => void runSeriesAction(async () => { if (seriesUploadKey === 'd_6_1') { await linkConfirmedSeriesStatement(series.id, selectedReferenceDocId, seriesStatementConfirmed); setSeriesStatementConfirmed(false); } else { await linkExistingSeriesDocument(series.id, selectedReferenceDocId); } setSelectedReferenceDocId(''); }, 'Existing approved file linked without re-upload.')} className="rounded border border-sky-500/40 px-3 py-2 text-xs text-sky-400 disabled:opacity-40"><FilePlus className="w-3.5 h-3.5 inline mr-1" />Link existing document</button>
                       </div>
                       <div className="flex items-center gap-2"><input ref={seriesFileInput} type="file" className="hidden" onChange={e => void handleSeriesFileSelected(e)} />
-                        <button type="button" disabled={seriesBusy} onClick={() => { if(seriesFileInput.current) seriesFileInput.current.value=''; seriesFileInput.current?.click(); }} className="px-3 py-2 border border-primary/40 rounded text-primary text-xs"><Upload className="w-3 h-3 inline mr-1" />Upload new / updated file</button>
+                        <button type="button" disabled={seriesBusy || (seriesUploadKey === 'd_6_1' && !seriesStatementConfirmed)} onClick={() => { if(seriesFileInput.current) seriesFileInput.current.value=''; seriesFileInput.current?.click(); }} className="px-3 py-2 border border-primary/40 rounded text-primary text-xs"><Upload className="w-3 h-3 inline mr-1" />Upload new / updated file</button>
                         <span className="text-[10px] text-muted-foreground">To retire a previous version, unlink it after verifying the new file.</span></div>
                       {seriesDocs.filter(d => d.seriesId === series.id).map(d => <div key={d.id} className="flex gap-2 items-center text-[11px] border border-border rounded p-2">
                         <span className="text-muted-foreground shrink-0">{d.docKey.replace('d_','').replace('_','.')}</span><span className="truncate flex-1" title={d.name}>{d.name}</span>
