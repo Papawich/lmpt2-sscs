@@ -1166,6 +1166,7 @@ export default function App() {
   const searchRef = useRef<HTMLDivElement>(null);
 
   // ── Admin state ──────────────────────────────────────────────────────────────
+  const [adminSection, setAdminSection] = useState<"shipSeries" | "passwordReset" | "users">("shipSeries");
   const [adminTab, setAdminTab] = useState<AdminTab>("pending");
   const [shipSeries, setShipSeries] = useState<ShipSeries[]>([]);
   const [seriesDocs, setSeriesDocs] = useState<SeriesDocument[]>([]);
@@ -3296,7 +3297,30 @@ setPage("study");
               <div key={label} className="border border-border rounded bg-card p-4"><div className="flex items-center gap-2 mb-2"><Icon className={`w-4 h-4 ${c}`} /><span className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest">{label}</span></div><p className={`font-mono text-2xl font-bold ${c}`}>{n}</p></div>
             ))}
           </div>
+          {/* Main Admin sections: keep account status filters within User Management. */}
+          <div role="tablist" aria-label="Admin Panel sections" className="flex gap-1 overflow-x-auto border-b border-border mb-6">
+            {([
+              { key: "shipSeries" as const, label: "Ship Series Management", count: shipSeries.length, icon: Ship },
+              { key: "passwordReset" as const, label: "Password Reset Requests", count: pendingPasswordResets.length, icon: KeyRound },
+              { key: "users" as const, label: "User Management", count: nonAdmins.length, icon: Users },
+            ]).map(({ key, label, count, icon: Icon }) => (
+              <button
+                key={key}
+                type="button"
+                role="tab"
+                aria-selected={adminSection === key}
+                onClick={() => setAdminSection(key)}
+                className={`flex shrink-0 items-center gap-2 border-b-2 -mb-px px-4 py-3 font-mono text-xs transition-colors ${adminSection === key ? "border-primary text-primary font-semibold" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                {label}
+                <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${adminSection === key ? "bg-primary/10 text-primary" : "bg-secondary text-muted-foreground"}`}>{count}</span>
+              </button>
+            ))}
+          </div>
           {/* Ship Series Management: independent of sister-ship study approval. */}
+          {adminSection === "shipSeries" && (
+
           <div className="border border-border rounded bg-card mb-8 overflow-hidden">
             <div className="px-5 py-4 bg-secondary/50 border-b border-border flex items-center justify-between gap-3">
               <div><p className="font-mono text-sm font-semibold text-foreground">SHIP SERIES MANAGEMENT</p>
@@ -3456,6 +3480,8 @@ setPage("study");
             </div>
           </div>
 
+          )}
+          {adminSection === "passwordReset" && (
           <div className="border border-border rounded bg-card mb-8 overflow-hidden">
             <div className="flex items-center justify-between gap-4 px-5 py-4 bg-secondary/50 border-b border-border">
               <div>
@@ -3490,6 +3516,9 @@ setPage("study");
             )}
           </div>
 
+          )}
+          {adminSection === "users" && (
+          <>
           <div className="flex gap-1 mb-4 border-b border-border">
             {tabs.map(t => (
               <button key={t.key} onClick={() => setAdminTab(t.key)}
@@ -3529,6 +3558,8 @@ setPage("study");
                   </div>
                 ))}
               </div>}
+          </>
+          )}
         </div>
         <TaskFloater tasks={myTasks} open={showTaskPanel} onToggle={() => setShowTaskPanel(p => !p)} onSelect={goToStudyFromTask} />
 
