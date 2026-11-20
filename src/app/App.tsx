@@ -51,6 +51,7 @@ import {
   renameVesselEverywhere,
   updateSisterShipVerification,
   fetchApprovedSisterReferenceVesselIds,
+  fetchVesselApprovalEvents, fetchVesselFirstApprovalOverrides, saveVesselFirstApprovalOverride,
   fetchStudies,
   saveStudy as saveCloudStudy,
   markStudyFeedbackCorrected,
@@ -63,7 +64,7 @@ import {
   renameShipSeries, fetchSeriesDocuments, uploadSeriesDocument, unlinkSeriesDocument,
   fetchRepresentativeApprovedDocuments, linkExistingSeriesDocument, linkAvailableRepresentativeDocuments, linkConfirmedSeriesStatement,
 } from "./backendService";
-import type { ShipSeries, SeriesDocument, RepresentativeDocument } from "./backendService";
+import type { ShipSeries, SeriesDocument, RepresentativeDocument, VesselApprovalEvent } from "./backendService";
 import { SERIES_PHYSICAL_PARTS, previewPhysicalMerge, copyIntroducedMedia, countPhysicalChanges } from "./seriesPhysicalData";
 import type { PhysicalPart } from "./seriesPhysicalData";
 import type { CloudPasswordResetRequest, CloudVesselAccess } from "./backendService";
@@ -305,6 +306,7 @@ type Page           = "login" | "register" | "forgot" | "home" | "vessel" | "stu
 type RegStep        = "form" | "otp" | "submitted";
 type ForgotStep     = "email" | "pending" | "password" | "done";
 type AdminTab       = "pending" | "approved" | "rejected" | "all";
+type AdminSection   = "series" | "password" | "users";
 
 interface UserAccount {
   id: string; name: string; email: string;
@@ -1166,8 +1168,8 @@ export default function App() {
   const searchRef = useRef<HTMLDivElement>(null);
 
   // ── Admin state ──────────────────────────────────────────────────────────────
-  const [adminSection, setAdminSection] = useState<"shipSeries" | "passwordReset" | "users">("shipSeries");
   const [adminTab, setAdminTab] = useState<AdminTab>("pending");
+  const [adminSection, setAdminSection] = useState<AdminSection>("series");
   const [shipSeries, setShipSeries] = useState<ShipSeries[]>([]);
   const [seriesDocs, setSeriesDocs] = useState<SeriesDocument[]>([]);
   const [seriesNameInput, setSeriesNameInput] = useState('');
@@ -1202,6 +1204,15 @@ export default function App() {
 
   // ── SSCS Summary popup ───────────────────────────────────────────────────────
   const [summaryVesselId, setSummaryVesselId] = useState<number | null>(null);
+  // Approval history is read from the existing database audit log, not inferred from Study count.
+  const [approvalEvents, setApprovalEvents] = useState<VesselApprovalEvent[]>([]);
+  const [firstApprovalOverrides, setFirstApprovalOverrides] = useState<Record<number, string>>({});
+  const [approvalHistoryLoaded, setApprovalHistoryLoaded] = useState(false);
+  const [approvalHistoryError, setApprovalHistoryError] = useState("");
+  const [approvalHistoryVesselId, setApprovalHistoryVesselId] = useState<number | null>(null);
+  const [firstApprovalDraft, setFirstApprovalDraft] = useState("");
+  const [firstApprovalSaving, setFirstApprovalSaving] = useState(false);
+  const canManageApprovalHistory = Boolean(currentUser?.isAdmin || currentUser?.role === "terminal_officer");
 
   // ── Add Vessel state ─────────────────────────────────────────────────────────
   const [showAddVessel, setShowAddVessel] = useState(false);
@@ -1568,6 +1579,91 @@ export default function App() {
     }
   }, [page, currentUser?.id]);
 
+  // Approval history is access-controlled: existing audit RLS allows admins and terminal officers.
+  // Fetch independently so a history error never prevents Studies or vessels from loading.
+  useEffect(() => {
+    if (!supabaseConfigured || !currentUser?.id || !canManageApprovalHistory) return;
+    let cancelled = false;
+    setApprovalHistoryLoaded(false);
+    setApprovalHistoryError("");
+    Promise.all([fetchVesselApprovalEvents(), fetchVesselFirstApprovalOverrides()])
+      .then(([events, overrides]) => {
+        if (cancelled) return;
+        setApprovalEvents(events);
+        setFirstApprovalOverrides(overrides);
+        setApprovalHistoryLoaded(true);
+      })
+      .catch(error => {
+        if (!cancelled) setApprovalHistoryError(error instanceof Error ? error.message : String(error));
+      });
+    return () => { cancelled = true; };
+  }, [currentUser?.id, canManageApprovalHistory]);
+
+  function formatApprovalDate(value: string): string {
+    // A manually corrected date is DATE-only, so never parse it as UTC midnight.
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      const [year, month, day] = value.split("-").map(Number);
+      return new Date(year, month - 1, day).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+    }
+    return new Date(value).toLocaleDateString("en-GB", { timeZone: "Asia/Bangkok", day: "2-digit", month: "short", year: "numeric" });
+  }
+
+  function approvalSummary(vesselId: number) {
+    const events = approvalEvents.filter(event => event.vesselId === vesselId)
+      .sort((a, b) => a.approvedAt.localeCompare(b.approvedAt));
+    const approvedStudies = studies.filter(study => study.vesselId === vesselId && study.approvedAt);
+    const fallbackLatest = approvedStudies.reduce((latest, study) =>
+      study.approvedAt! > latest ? study.approvedAt! : latest, "");
+    const firstRecorded = events[0]?.approvedAt ?? (fallbackLatest || "");
+    const latestRecorded = events.length ? events[events.length - 1].approvedAt : fallbackLatest;
+    return {
+      events,
+      first: firstApprovalOverrides[vesselId] || firstRecorded,
+      latest: latestRecorded,
+      count: events.length || (fallbackLatest ? 1 : 0),
+      isAuditBased: events.length > 0,
+    };
+  }
+
+  function openVesselApprovalHistory(vesselId: number) {
+    if (!canManageApprovalHistory) return;
+    const info = approvalSummary(vesselId);
+    setFirstApprovalDraft(info.first ? info.first.slice(0, 10) : "");
+    setApprovalHistoryVesselId(vesselId);
+  }
+
+  async function saveFirstApprovalDate() {
+    if (!approvalHistoryVesselId || !canManageApprovalHistory || !currentUser?.id || firstApprovalSaving) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(firstApprovalDraft)) {
+      showToast("Enter a valid First Approval Date.", "error"); return;
+    }
+    const selectedDate = new Date(firstApprovalDraft + "T00:00:00");
+    if (Number.isNaN(selectedDate.getTime()) || selectedDate.getFullYear() !== Number(firstApprovalDraft.slice(0, 4)) ||
+        selectedDate.getMonth() + 1 !== Number(firstApprovalDraft.slice(5, 7)) || selectedDate.getDate() !== Number(firstApprovalDraft.slice(8, 10))) {
+      showToast("Invalid calendar date.", "error"); return;
+    }
+    const history = approvalSummary(approvalHistoryVesselId);
+    if (!history.count) { showToast("No approval has been recorded for this vessel yet.", "error"); return; }
+    const latestLocalDate = history.latest ? new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Bangkok", year: "numeric", month: "2-digit", day: "2-digit"
+    }).formatToParts(new Date(history.latest)).reduce<Record<string, string>>((parts, item) => {
+      parts[item.type] = item.value; return parts;
+    }, {}) : null;
+    const latestDateISO = latestLocalDate
+      ? `${latestLocalDate.year}-${latestLocalDate.month}-${latestLocalDate.day}` : "";
+    if (latestDateISO && firstApprovalDraft > latestDateISO) {
+      showToast("First Approval Date cannot be later than the latest recorded approval.", "error"); return;
+    }
+    setFirstApprovalSaving(true);
+    try {
+      await saveVesselFirstApprovalOverride(approvalHistoryVesselId, firstApprovalDraft, currentUser.id);
+      setFirstApprovalOverrides(previous => ({ ...previous, [approvalHistoryVesselId]: firstApprovalDraft }));
+      showToast("First Approval Date updated. Approval event history is unchanged.");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to save First Approval Date.", "error");
+    } finally { setFirstApprovalSaving(false); }
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
   // AUTH HANDLERS
   // ─────────────────────────────────────────────────────────────────────────
@@ -1880,6 +1976,8 @@ export default function App() {
       console.warn("[Supabase sign out failed]", err);
     } finally {
       setCurrentUser(null); setLoginEmail(""); setLoginPw(""); setSearchQuery("");
+      setApprovalEvents([]); setFirstApprovalOverrides({}); setApprovalHistoryLoaded(false);
+      setApprovalHistoryVesselId(null); setApprovalHistoryError("");
       setSelectedVessel(null); setActiveStudy(null); setPage("login");
       if (supabaseConfigured) { setUsers([]); setVesselAccesses([]); setVessels([]); setStudies([]); }
     }
@@ -2842,6 +2940,12 @@ if (study.status === "approved") {
       await saveCloudStudy(approvedStudy, currentUser.id);
     }
 
+    // Refresh existing audit-based Approval History after the DB confirms approval.
+    if (canManageApprovalHistory && supabaseConfigured) {
+      void fetchVesselApprovalEvents().then(setApprovalEvents)
+        .catch(error => console.warn("[Approval history refresh failed]", error));
+    }
+
     // 4. Update local state only after approval is successfully persisted.
     setActiveStudy(approvedStudy);
     setStudies(prev =>
@@ -3297,30 +3401,33 @@ setPage("study");
               <div key={label} className="border border-border rounded bg-card p-4"><div className="flex items-center gap-2 mb-2"><Icon className={`w-4 h-4 ${c}`} /><span className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest">{label}</span></div><p className={`font-mono text-2xl font-bold ${c}`}>{n}</p></div>
             ))}
           </div>
-          {/* Main Admin sections: keep account status filters within User Management. */}
-          <div role="tablist" aria-label="Admin Panel sections" className="flex gap-1 overflow-x-auto border-b border-border mb-6">
+          {/* Top-level admin sections. Existing user-status filters remain inside User Management. */}
+          <div role="tablist" aria-label="Admin management sections" className="flex flex-wrap gap-2 mb-6 border-b border-border pb-3">
             {([
-              { key: "shipSeries" as const, label: "Ship Series Management", count: shipSeries.length, icon: Ship },
-              { key: "passwordReset" as const, label: "Password Reset Requests", count: pendingPasswordResets.length, icon: KeyRound },
-              { key: "users" as const, label: "User Management", count: nonAdmins.length, icon: Users },
-            ]).map(({ key, label, count, icon: Icon }) => (
+              { key: "series", label: "Ship Series Management", Icon: Ship, count: shipSeries.length },
+              { key: "password", label: "Password Reset Requests", Icon: KeyRound, count: pendingPasswordResets.length },
+              { key: "users", label: "User Management", Icon: Users, count: nonAdmins.length },
+            ] as const).map(({ key, label, Icon, count }) => (
               <button
                 key={key}
                 type="button"
                 role="tab"
+                id={`admin-tab-${key}`}
                 aria-selected={adminSection === key}
+                aria-controls={`admin-panel-${key}`}
                 onClick={() => setAdminSection(key)}
-                className={`flex shrink-0 items-center gap-2 border-b-2 -mb-px px-4 py-3 font-mono text-xs transition-colors ${adminSection === key ? "border-primary text-primary font-semibold" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+                className={`inline-flex items-center gap-2 rounded-t border px-4 py-2.5 font-mono text-xs transition-colors ${adminSection === key
+                  ? "border-primary bg-primary/10 text-primary font-semibold"
+                  : "border-border bg-card text-muted-foreground hover:bg-secondary hover:text-foreground"}`}
               >
-                <Icon className="w-3.5 h-3.5" />
-                {label}
-                <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${adminSection === key ? "bg-primary/10 text-primary" : "bg-secondary text-muted-foreground"}`}>{count}</span>
+                <Icon className="w-4 h-4" />{label}
+                <span className={`rounded px-1.5 py-0.5 text-[10px] ${adminSection === key ? "bg-primary/15" : "bg-secondary"}`}>{count}</span>
               </button>
             ))}
           </div>
+          {adminSection === "series" && (
+            <div id="admin-panel-series" role="tabpanel" aria-labelledby="admin-tab-series">
           {/* Ship Series Management: independent of sister-ship study approval. */}
-          {adminSection === "shipSeries" && (
-
           <div className="border border-border rounded bg-card mb-8 overflow-hidden">
             <div className="px-5 py-4 bg-secondary/50 border-b border-border flex items-center justify-between gap-3">
               <div><p className="font-mono text-sm font-semibold text-foreground">SHIP SERIES MANAGEMENT</p>
@@ -3480,8 +3587,10 @@ setPage("study");
             </div>
           </div>
 
+            </div>
           )}
-          {adminSection === "passwordReset" && (
+          {adminSection === "password" && (
+            <div id="admin-panel-password" role="tabpanel" aria-labelledby="admin-tab-password">
           <div className="border border-border rounded bg-card mb-8 overflow-hidden">
             <div className="flex items-center justify-between gap-4 px-5 py-4 bg-secondary/50 border-b border-border">
               <div>
@@ -3516,9 +3625,10 @@ setPage("study");
             )}
           </div>
 
+            </div>
           )}
           {adminSection === "users" && (
-          <>
+            <div id="admin-panel-users" role="tabpanel" aria-labelledby="admin-tab-users">
           <div className="flex gap-1 mb-4 border-b border-border">
             {tabs.map(t => (
               <button key={t.key} onClick={() => setAdminTab(t.key)}
@@ -3558,7 +3668,7 @@ setPage("study");
                   </div>
                 ))}
               </div>}
-          </>
+            </div>
           )}
         </div>
         <TaskFloater tasks={myTasks} open={showTaskPanel} onToggle={() => setShowTaskPanel(p => !p)} onSelect={goToStudyFromTask} />
@@ -3681,12 +3791,14 @@ setPage("study");
                 )}
               </div>
             : <div className="border border-border rounded overflow-hidden">
-                <div className="grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-4 px-5 py-3 bg-secondary border-b border-border text-[10px] font-mono text-muted-foreground uppercase tracking-widest">
-                  <span>Vessel Name</span><span className="hidden md:block">Type</span><span className="hidden sm:block">Capacity</span><span className="hidden lg:block">Flag / Year</span><span>Status</span><span>SSCS</span>
+                <div className="overflow-x-auto">
+                <div className="min-w-[1220px] grid grid-cols-[minmax(210px,1fr)_95px_120px_160px_115px_115px_90px_92px_45px] gap-3 px-5 py-3 bg-secondary border-b border-border text-[10px] font-mono text-muted-foreground uppercase tracking-widest">
+                  <span>Vessel Name</span><span>Type</span><span>Capacity</span><span>Flag / Year</span><span>First Approval</span><span>Latest Approval</span><span>Approvals</span><span>Status</span><span>SSCS</span>
                 </div>
                 {display.map((v, i) => {
                   const study = getLatestStudy(studies, v.id);
                   const mainVessel = vesselWithSubmittedGeneralInfo(v, study);
+                  const history = canManageApprovalHistory ? approvalSummary(v.id) : null;
                   const invalidCertificateCount = study
                     ? getInvalidCertificateCount(study.qualityAssessmentData)
                     : 0;
@@ -3695,7 +3807,7 @@ setPage("study");
                     : 0;
                   return (
                     <div key={v.id}
-                      className={`w-full grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-4 px-5 py-3.5 items-center hover:bg-secondary/60 transition-colors group ${i < display.length - 1 ? "border-b border-border/50" : ""}`}>
+                      className={`min-w-[1220px] grid grid-cols-[minmax(210px,1fr)_95px_120px_160px_115px_115px_90px_92px_45px] gap-3 px-5 py-3.5 items-center hover:bg-secondary/60 transition-colors group ${i < display.length - 1 ? "border-b border-border/50" : ""}`}>
                       <button className="flex items-center gap-3 min-w-0 text-left" onClick={() => { setSelectedVessel(mainVessel); setPage("vessel"); }}>
                         <div className="w-7 h-7 rounded bg-primary/8 border border-primary/15 flex items-center justify-center shrink-0 group-hover:border-primary/30 transition-colors">
                           <Ship className="w-3.5 h-3.5 text-primary/60 group-hover:text-primary transition-colors" />
@@ -3715,9 +3827,17 @@ setPage("study");
                           </div>
                         </div>
                       </button>
-                      <span className="hidden md:block font-mono text-xs text-muted-foreground whitespace-nowrap">{mainVessel.type}</span>
-                      <span className="hidden sm:block font-mono text-xs text-foreground whitespace-nowrap">{mainVessel.capacity}</span>
-                      <span className="hidden lg:block text-xs text-muted-foreground whitespace-nowrap">{mainVessel.flag} · {mainVessel.year > 0 ? mainVessel.year : "—"}</span>
+                      <span className="font-mono text-xs text-muted-foreground truncate">{mainVessel.type}</span>
+                      <span className="font-mono text-xs text-foreground truncate">{mainVessel.capacity}</span>
+                      <span className="text-xs text-muted-foreground truncate">{mainVessel.flag} · {mainVessel.year > 0 ? mainVessel.year : "—"}</span>
+                      <span className="font-mono text-xs text-foreground whitespace-nowrap">{history?.first ? formatApprovalDate(history.first) : "—"}</span>
+                      <span className="font-mono text-xs text-foreground whitespace-nowrap">{history?.latest ? formatApprovalDate(history.latest) : (study?.approvedAt ? formatApprovalDate(study.approvedAt) : "—")}</span>
+                      {canManageApprovalHistory ? (
+                        <button type="button" title="View Approval History" onClick={() => openVesselApprovalHistory(v.id)}
+                          className="inline-flex items-center justify-center gap-1 rounded border border-primary/25 px-2 py-1 font-mono text-xs text-primary hover:bg-primary/10">
+                          <ClipboardList className="w-3 h-3" /> {approvalHistoryLoaded ? history?.count ?? 0 : "…"}
+                        </button>
+                      ) : <span className="font-mono text-xs text-muted-foreground">—</span>}
                       <VesselBadge status={v.status} />
                       <button
                         title="SSCS Summary"
@@ -3728,9 +3848,67 @@ setPage("study");
                     </div>
                   );
                 })}
+                </div>
               </div>}
           {searchQuery.trim() && searchResults.length === 0 && <p className="text-center text-xs text-muted-foreground mt-4 font-mono">No vessels matched — try a different term</p>}
         </div>
+
+        {/* Vessel Approval History. Real events come from the existing immutable audit log. */}
+        {approvalHistoryVesselId !== null && (() => {
+          const vessel = vessels.find(v => v.id === approvalHistoryVesselId);
+          if (!vessel || !canManageApprovalHistory) return null;
+          const history = approvalSummary(vessel.id);
+          return (
+            <div className="fixed inset-0 z-[75] bg-background/80 backdrop-blur-sm flex items-center justify-center p-4"
+              onClick={() => setApprovalHistoryVesselId(null)}>
+              <div role="dialog" aria-modal="true" aria-label="Vessel Approval History"
+                className="w-full max-w-3xl max-h-[85vh] overflow-y-auto rounded border border-border bg-card shadow-2xl"
+                onClick={event => event.stopPropagation()}>
+                <div className="flex items-start justify-between gap-3 border-b border-border bg-secondary/30 px-5 py-4">
+                  <div>
+                    <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">Approval History</p>
+                    <p className="font-semibold text-foreground">{vessel.name} · {vessel.imo}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{history.count} recorded approval{history.count === 1 ? "" : "s"}</p>
+                  </div>
+                  <button onClick={() => setApprovalHistoryVesselId(null)} aria-label="Close history"><X className="w-4 h-4" /></button>
+                </div>
+                <div className="p-5 space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+                    <div className="rounded border border-border p-3"><div className="text-xs text-muted-foreground">First Approval Date</div><div className="font-mono font-bold">{history.first ? formatApprovalDate(history.first) : "—"}</div></div>
+                    <div className="rounded border border-border p-3"><div className="text-xs text-muted-foreground">Latest Approval Date</div><div className="font-mono font-bold">{history.latest ? formatApprovalDate(history.latest) : "—"}</div></div>
+                    <div className="rounded border border-border p-3"><div className="text-xs text-muted-foreground">Approval Count</div><div className="font-mono font-bold">{history.count}</div></div>
+                  </div>
+                  <div className="rounded border border-border p-3 space-y-2">
+                    <label className="block text-xs font-semibold">Correct First Approval Date (Terminal Officer / Admin)</label>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <input type="date" disabled={!history.count} value={firstApprovalDraft} onChange={event => setFirstApprovalDraft(event.target.value)}
+                        className="rounded border border-border bg-background px-3 py-2 text-sm" />
+                      <button disabled={firstApprovalSaving || !firstApprovalDraft || history.count === 0} onClick={saveFirstApprovalDate}
+                        className="rounded bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50">
+                        {firstApprovalSaving ? "Saving…" : "Save First Date"}
+                      </button>
+                    </div>
+                    <p className="text-xs text-muted-foreground">Only the displayed First Approval Date is corrected; the original approval events, count, and Latest Approval Date remain unchanged.</p>
+                  </div>
+                  <div className="rounded border border-border overflow-x-auto">
+                    <table className="w-full min-w-[580px] text-left text-xs">
+                      <thead className="bg-secondary/60"><tr><th className="p-3">#</th><th className="p-3">Approved At</th><th className="p-3">Study ID</th><th className="p-3">Approved By</th></tr></thead>
+                      <tbody>{history.events.slice().reverse().map((event, index) => {
+                        const officer = users.find(user => user.id === event.userId);
+                        return <tr key={event.id} className="border-t border-border"><td className="p-3">{history.events.length - index}</td>
+                          <td className="p-3 font-mono">{new Date(event.approvedAt).toLocaleString("en-GB", { timeZone: "Asia/Bangkok", day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</td>
+                          <td className="p-3 font-mono">{event.studyId}</td><td className="p-3">{officer?.name || "Recorded in audit log"}</td></tr>;
+                      })}</tbody>
+                    </table>
+                    {!history.events.length && <p className="p-4 text-xs text-muted-foreground">No historical approval events found in the audit log. Existing Study approval data may predate the audit history.</p>}
+                  </div>
+                  {!history.isAuditBased && history.count > 0 && <p className="text-xs text-amber-600">A previous approval date exists in the Study, but no corresponding event was found in the audit log. The count is a minimum, not verified history.</p>}
+                  {approvalHistoryError && <p className="text-xs text-red-500">History could not load: {approvalHistoryError}</p>}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* SSCS Summary Modal */}
         {summaryVesselId !== null && (() => {
