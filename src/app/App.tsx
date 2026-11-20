@@ -548,6 +548,27 @@ function mergeSisterReferenceStudy(target: SSCSStudy, reference: SSCSStudy): SSC
   };
 }
 
+// Vessel master capacity is stored as a unit-free numeric string. The UI adds
+// thousands separators and m³ without rounding away source decimal places.
+function normalizeVesselCapacity(value: string | null | undefined): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw === "—") return null;
+  const digits = raw.replace(/\s*(?:m³|m3|cbm|cum|cu\.?\s*mtrs?|cu\.?\s*m\.?)\s*$/i, "").trim();
+  if (!/^(?:\d{1,3}(?:[ ,]\d{3})+|\d+)(?:\.\d+)?$/.test(digits)) return null;
+  const normalized = digits.replace(/[ ,]/g, "");
+  const amount = Number(normalized);
+  // Avoid treating ship type/model numbers or obviously invalid values as capacity.
+  return Number.isFinite(amount) && amount >= 100000 && amount <= 400000 ? normalized : null;
+}
+
+function formatVesselCapacity(value: string | null | undefined): string {
+  const normalized = normalizeVesselCapacity(value);
+  if (!normalized) return "—";
+  const [integer, fraction] = normalized.split(".");
+  const grouped = integer.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${grouped}${fraction === undefined ? "" : `.${fraction}`} m³`;
+}
+
 function vesselWithSubmittedGeneralInfo(vessel: Vessel, study?: SSCSStudy): Vessel {
   // Main/Search must show the latest submitted information, not unfinished edits.
   // Draft/editing values stay inside the study until the user submits again.
@@ -557,10 +578,7 @@ function vesselWithSubmittedGeneralInfo(vessel: Vessel, study?: SSCSStudy): Vess
   const gi = (id: string) => study.items.find(item => item.id === id)?.value?.trim() ?? "";
   const yearRaw = gi("gi-06");
   const parsedYear = Number.parseInt(yearRaw, 10);
-  const capacityRaw = gi("gi-10");
-  const capacity = capacityRaw
-    ? `${capacityRaw}${/m³|m3/i.test(capacityRaw) ? "" : " m³"}`
-    : vessel.capacity;
+  const capacity = normalizeVesselCapacity(gi("gi-10")) ?? vessel.capacity;
 
   return {
     ...vessel,
@@ -2410,6 +2428,9 @@ if (study.status === "approved") {
     setAddVErr("");
     if (!addVName.trim()) return setAddVErr("Vessel name is required.");
     if (!addVImo.trim())  return setAddVErr("IMO number is required.");
+    const cleanCapacity = normalizeVesselCapacity(addVCapacity);
+    if (addVCapacity.trim() && !cleanCapacity)
+      return setAddVErr("Enter a valid capacity number in m³, e.g. 174000.50. Leave blank if unknown.");
     if (vessels.find(v => v.imo.toLowerCase() === addVImo.trim().toLowerCase()))
       return setAddVErr("A vessel with this IMO number already exists.");
     if (!currentUser) return;
@@ -2426,7 +2447,7 @@ if (study.status === "approved") {
 
     let newVessel: Vessel = {
       id: Date.now(), name: addVName.trim(), type: addVType,
-      capacity: addVCapacity.trim() || "—", flag: addVFlag.trim() || "—",
+      capacity: cleanCapacity || "—", flag: addVFlag.trim() || "—",
       year: parseInt(addVYear) || new Date().getFullYear(),
       imo: addVImo.trim(), status: addVStatus, createdById: currentUser.id,
       callSign: "—", portOfRegistry: "—",
@@ -3505,7 +3526,7 @@ setPage("study");
                               <input placeholder="Flag" value={seriesEditFlag} onChange={e => setSeriesEditFlag(e.target.value)} className="bg-background border border-border rounded p-2" />
                               <input placeholder="Capacity (e.g. 266,000 m³)" value={seriesEditCapacity} onChange={e => setSeriesEditCapacity(e.target.value)} className="bg-background border border-border rounded p-2" />
                               <input placeholder="Year built (YYYY)" value={seriesEditYear} onChange={e => setSeriesEditYear(e.target.value)} className="bg-background border border-border rounded p-2" />
-                              <button type="button" disabled={seriesBusy || !/^\d{7}$/.test(seriesEditImo.trim()) || !seriesEditFlag.trim() || !seriesEditCapacity.trim() || !/^\d{4}$/.test(seriesEditYear)} onClick={() => void runSeriesAction(async () => { await completeSeriesPlaceholderVessel(v.id, {imo:seriesEditImo.trim(), flag:seriesEditFlag.trim(),capacity:seriesEditCapacity.trim(),yearBuilt:Number(seriesEditYear)}); setSeriesEditPlaceholderId(null); }, `${v.name} details completed.`)} className="border border-primary rounded px-3 py-2 text-primary disabled:opacity-40">Save vessel details</button>
+                              <button type="button" disabled={seriesBusy || !/^\d{7}$/.test(seriesEditImo.trim()) || !seriesEditFlag.trim() || !normalizeVesselCapacity(seriesEditCapacity) || !/^\d{4}$/.test(seriesEditYear)} onClick={() => void runSeriesAction(async () => { await completeSeriesPlaceholderVessel(v.id, {imo:seriesEditImo.trim(), flag:seriesEditFlag.trim(),capacity:normalizeVesselCapacity(seriesEditCapacity)!,yearBuilt:Number(seriesEditYear)}); setSeriesEditPlaceholderId(null); }, `${v.name} details completed.`)} className="border border-primary rounded px-3 py-2 text-primary disabled:opacity-40">Save vessel details</button>
                               <button type="button" onClick={() => setSeriesEditPlaceholderId(null)} className="border border-border rounded px-3 py-2">Cancel</button>
                             </div>}
                           </div>)}
@@ -3828,7 +3849,7 @@ setPage("study");
                         </div>
                       </button>
                       <span className="font-mono text-xs text-muted-foreground truncate">{mainVessel.type}</span>
-                      <span className="font-mono text-xs text-foreground truncate">{mainVessel.capacity}</span>
+                      <span className="font-mono text-xs text-foreground truncate">{formatVesselCapacity(mainVessel.capacity)}</span>
                       <span className="text-xs text-muted-foreground truncate">{mainVessel.flag} · {mainVessel.year > 0 ? mainVessel.year : "—"}</span>
                       <span className="font-mono text-xs text-foreground whitespace-nowrap">{history?.first ? formatApprovalDate(history.first) : "—"}</span>
                       <span className="font-mono text-xs text-foreground whitespace-nowrap">{history?.latest ? formatApprovalDate(history.latest) : (study?.approvedAt ? formatApprovalDate(study.approvedAt) : "—")}</span>
@@ -4338,9 +4359,9 @@ setPage("study");
     const detailOperator       = studyValue("gi-08") || v.operator || "—";
     const detailContainment    = studyValue("gi-09") || v.type || "—";
     const detailCapacityRaw    = studyValue("gi-10");
-    const detailCapacity       = detailCapacityRaw
-      ? `${detailCapacityRaw}${/m³|m3/i.test(detailCapacityRaw) ? "" : " m³"}`
-      : (v.capacity || "—");
+    const detailCapacity       = formatVesselCapacity(detailCapacityRaw) !== "—"
+      ? formatVesselCapacity(detailCapacityRaw)
+      : formatVesselCapacity(v.capacity);
     const detailClassification = studyValue("gi-11") || v.classification || "—";
     const detailGas1           = studyValue("gi-12") || v.gasMgmt1 || "";
     const detailGas2           = studyValue("gi-13") || v.gasMgmt2 || "";
