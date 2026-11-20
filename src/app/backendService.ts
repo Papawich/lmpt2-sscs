@@ -118,7 +118,8 @@ function vesselFromRow(row: any): AnyVessel {
   return {
     id: Number(row.id),
     name: row.name,
-    imo: row.imo,
+    imo: row.imo ?? "",
+    isPlaceholder: Boolean(row.is_placeholder),
     callSign: row.call_sign ?? "—",
     flag: row.flag ?? "—",
     portOfRegistry: row.port_of_registry ?? "—",
@@ -145,7 +146,7 @@ function vesselToRow(vessel: AnyVessel) {
   return {
     ...(vessel.id ? { id: vessel.id } : {}),
     name: vessel.name,
-    imo: vessel.imo,
+    imo: vessel.imo || null,
     call_sign: vessel.callSign || null,
     flag: vessel.flag || null,
     port_of_registry: vessel.portOfRegistry || null,
@@ -813,6 +814,154 @@ export async function deleteStudyDocument(file: CloudUploadedFile) {
   if (metadataError) throw metadataError;
 }
 
+
+// Ship Series are independent of the legacy sister-ship verification/approval workflow.
+export type ShipSeries = { id: string; name: string; representativeVesselId: number; notes: string; members: number[] };
+export type SeriesDocument = CloudUploadedFile & { seriesId: string; docKey: string; sourceDocumentId?: string | null };
+export type RepresentativeDocument = CloudUploadedFile & { studyId: string; docKey: string };
+
+export async function fetchShipSeries(): Promise<ShipSeries[]> {
+  const client = requireSupabase();
+  const [{ data: groups, error: groupError }, { data: members, error: memberError }] = await Promise.all([
+    client.from('ship_series').select('id,name,representative_vessel_id,notes').order('name'),
+    client.from('ship_series_members').select('series_id,vessel_id'),
+  ]);
+  if (groupError) throw groupError;
+  if (memberError) throw memberError;
+  return (groups ?? []).map((g: any) => ({
+    id: g.id, name: g.name, representativeVesselId: Number(g.representative_vessel_id),
+    notes: g.notes ?? '',
+    members: (members ?? []).filter((m: any) => m.series_id === g.id).map((m: any) => Number(m.vessel_id)),
+  }));
+}
+
+export async function createShipSeries(opts: { name: string; representativeVesselId: number; notes?: string }): Promise<void> {
+  const { error } = await requireSupabase().rpc('admin_create_ship_series', {
+    p_name: opts.name.trim(), p_representative_vessel_id: opts.representativeVesselId,
+    p_notes: opts.notes?.trim() ?? '',
+  });
+  if (error) throw error;
+}
+
+export async function updateShipSeriesMembers(seriesId: string, vesselIds: number[]): Promise<void> {
+  const { error } = await requireSupabase().rpc('admin_set_ship_series_members', {
+    p_series_id: seriesId, p_vessel_ids: vesselIds,
+  });
+  if (error) throw error;
+}
+
+
+/** Admin-only atomic import. Existing vessels are reused by IMO / normalized name. */
+export async function importShipSeriesVessels(seriesId: string, rows: Array<{name:string;imo?:string}>): Promise<void> {
+  if (!rows.length) throw new Error('Enter at least one vessel.');
+  const { error } = await requireSupabase().rpc('admin_import_ship_series_vessels', {
+    p_series_id: seriesId, p_rows: rows,
+  });
+  if (error) throw error;
+}
+
+/** Fills an incomplete vessel without creating or modifying its Study. */
+export async function completeSeriesPlaceholderVessel(vesselId: number, details: {
+  imo:string;flag:string;capacity:string;yearBuilt:number;
+}): Promise<void> {
+  const { error } = await requireSupabase().rpc('admin_complete_series_placeholder_vessel', {
+    p_vessel_id: vesselId, p_imo: details.imo, p_flag: details.flag,
+    p_capacity: details.capacity, p_year_built: details.yearBuilt,
+  });
+  if (error) throw error;
+}
+
+export async function renameShipSeries(seriesId: string, name: string, notes: string): Promise<void> {
+  const { error } = await requireSupabase().from('ship_series')
+    .update({ name: name.trim(), notes: notes.trim() }).eq('id', seriesId);
+  if (error) throw error;
+}
+
+export async function fetchSeriesDocuments(): Promise<SeriesDocument[]> {
+  const { data, error } = await requireSupabase().from('ship_series_documents')
+    .select('id,series_id,doc_key,file_name,file_size,mime_type,storage_path,created_at,source_document_id')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((d: any) => ({
+    id: d.id, seriesId: d.series_id, docKey: d.doc_key, name: d.file_name,
+    size: d.file_size ?? 0, type: d.mime_type ?? '', uploadedAt: d.created_at,
+    storagePath: d.storage_path, sourceDocumentId: d.source_document_id ?? null,
+  }));
+}
+
+export async function uploadSeriesDocument(seriesId: string, docKey: string, file: File, statementConfirmed = false): Promise<void> {
+  if (docKey === 'd_6_1' && !statementConfirmed) throw new Error('Admin must confirm the statement covers the series before upload.');
+  const client = requireSupabase();
+  const id = crypto.randomUUID();
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]+/g, '_');
+  const path = `ship-series/${seriesId}/${docKey}/${id}-${safeName}`;
+  const { error: uploadError } = await client.storage.from('sscs-documents')
+    .upload(path, file, { upsert: false, contentType: file.type || undefined });
+  if (uploadError) throw uploadError;
+  const { error } = await client.from('ship_series_documents').insert({
+    id, series_id: seriesId, doc_key: docKey, file_name: file.name,
+    file_size: file.size, mime_type: file.type || null, storage_path: path,
+    ...(docKey === 'd_6_1' ? { statement_coverage_confirmed: statementConfirmed } : {}),
+  });
+  if (error) {
+    await client.storage.from('sscs-documents').remove([path]);
+    throw error;
+  }
+}
+
+// Remove only the reference; the original Storage blob is deliberately retained for audit.
+export async function unlinkSeriesDocument(id: string): Promise<void> {
+  const { error } = await requireSupabase().from('ship_series_documents').delete().eq('id', id);
+  if (error) throw error;
+}
+
+// Reuse an existing document from an APPROVED study of the series representative.
+// No storage copies, no updates to old approved studies.
+const APPROVED_SERIES_DOC_KEYS = ["d_2_1","d_2_2","d_2_3","d_2_4","d_2_5","d_3_1","d_3_2","d_3_3","d_3_4","d_4_1","d_4_2","d_6_1"];
+export async function fetchRepresentativeApprovedDocuments(representativeVesselId: number): Promise<RepresentativeDocument[]> {
+  const client = requireSupabase();
+  const { data: studies, error: studiesError } = await client.from('sscs_studies')
+    .select('id').eq('vessel_id', representativeVesselId).eq('status', 'approved');
+  if (studiesError) throw studiesError;
+  const studyIds = (studies ?? []).map((s: any) => s.id);
+  if (!studyIds.length) return [];
+  const { data, error } = await client.from('documents')
+    .select('id,study_id,document_type,file_name,file_size,mime_type,storage_path,created_at')
+    .in('study_id', studyIds).in('document_type', APPROVED_SERIES_DOC_KEYS)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((d: any) => ({
+    id: d.id, studyId: d.study_id, docKey: d.document_type, name: d.file_name,
+    size: Number(d.file_size ?? 0), type: d.mime_type ?? '',
+    uploadedAt: d.created_at, storagePath: d.storage_path,
+  }));
+}
+
+export async function linkExistingSeriesDocument(seriesId: string, documentId: string): Promise<void> {
+  // The RPC validates admin rights, approved status, representative vessel, and allowed doc key.
+  const { error } = await requireSupabase().rpc('admin_link_series_reference_document', {
+    p_series_id: seriesId, p_document_id: documentId,
+  });
+  if (error) throw error;
+}
+
+/** Link shared slots from the representative's latest approved Study in one action. */
+export async function linkAvailableRepresentativeDocuments(seriesId: string): Promise<number> {
+  const { data, error } = await requireSupabase().rpc('admin_link_all_series_reference_documents', {
+    p_series_id: seriesId,
+  });
+  if (error) throw error;
+  return Number(data ?? 0);
+}
+
+/** 6.1 is deliberately excluded from bulk links: each Statement needs explicit Admin approval. */
+export async function linkConfirmedSeriesStatement(seriesId: string, documentId: string, confirmed: boolean): Promise<void> {
+  if (!confirmed) throw new Error('Confirm that this Sister Ship Statement covers all series members.');
+  const { error } = await requireSupabase().rpc('admin_link_confirmed_series_statement', {
+    p_series_id: seriesId, p_document_id: documentId, p_confirm_coverage: confirmed,
+  });
+  if (error) throw error;
+}
 
 // Vessel approval history V6: only real transitions into approved from existing audit_logs.
 export interface VesselApprovalEvent {
