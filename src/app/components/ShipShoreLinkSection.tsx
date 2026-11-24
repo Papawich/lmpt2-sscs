@@ -95,6 +95,10 @@ export function isShipShoreLinkComplete(data: ShipShoreLinkData | undefined): bo
 const yi = "w-full bg-yellow-100 border border-yellow-400 rounded px-2 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:border-yellow-500 focus:ring-1 focus:ring-yellow-400 transition-all font-mono";
 const ro = "font-mono text-sm text-foreground";
 
+// Stored as a string in the existing ship_shore_link section; no schema change needed.
+const isPneumaticPressureAdjustable = (value: string | undefined) =>
+  (value ?? "").trim().toLowerCase() === "adjustable";
+
 // ─── System Form (Optical / Electric / Pneumatic) ─────────────────────────────
 
 function SystemForm<T extends SSLSystemData>({
@@ -556,17 +560,41 @@ export function ShipShoreLinkSection({ canEdit, data: dataProp, onChange }: Prop
               <td className="px-3 py-1.5">
                 <div className="flex items-center gap-2">
                   {canEdit ? (
-                    <input
-                      type="number" step="0.01"
-                      value={pn_.airPressure ?? ""}
-                      onChange={e => onChange({ ...data, pneumatic: { ...pn_, airPressure: e.target.value } })}
-                      placeholder="0.00"
-                      className="w-32 bg-yellow-100 border border-yellow-400 rounded px-2 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:border-yellow-500 focus:ring-1 focus:ring-yellow-400 transition-all font-mono"
-                    />
+                    <>
+                      <input
+                        type="number" step="0.01" min="0"
+                        value={isPneumaticPressureAdjustable(pn_.airPressure) ? "" : (pn_.airPressure ?? "")}
+                        onChange={e => onChange({ ...data, pneumatic: { ...pn_, airPressure: e.target.value } })}
+                        disabled={isPneumaticPressureAdjustable(pn_.airPressure)}
+                        placeholder="0.00"
+                        aria-label="Pneumatic air pressure in barg"
+                        className="w-32 bg-yellow-100 border border-yellow-400 rounded px-2 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:border-yellow-500 focus:ring-1 focus:ring-yellow-400 transition-all font-mono disabled:opacity-50 disabled:cursor-not-allowed"
+                      />
+                      {!isPneumaticPressureAdjustable(pn_.airPressure) && (
+                        <span className="font-mono text-xs text-muted-foreground">barg</span>
+                      )}
+                      <label className="ml-3 flex items-center gap-2 text-xs font-mono text-foreground cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={isPneumaticPressureAdjustable(pn_.airPressure)}
+                          onChange={e => onChange({
+                            ...data,
+                            pneumatic: { ...pn_, airPressure: e.target.checked ? "Adjustable" : "" },
+                          })}
+                          className="h-4 w-4 accent-blue-600"
+                        />
+                        Adjustable
+                      </label>
+                    </>
                   ) : (
-                    <span className="font-mono text-sm text-foreground">{pn_.airPressure ? Number(pn_.airPressure).toFixed(2) : "—"}</span>
+                    <span className="font-mono text-sm text-foreground">
+                      {isPneumaticPressureAdjustable(pn_.airPressure)
+                        ? "Adjustable"
+                        : pn_.airPressure !== "" && pn_.airPressure != null && Number.isFinite(Number(pn_.airPressure))
+                          ? `${Number(pn_.airPressure).toFixed(2)} barg`
+                          : "—"}
+                    </span>
                   )}
-                  <span className="font-mono text-xs text-muted-foreground">barg</span>
                 </div>
               </td>
             </tr>
