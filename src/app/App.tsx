@@ -60,7 +60,7 @@ import {
   getStudyDocumentUrl,
   fetchApprovalDocuments,
   deleteStudyDocument,
-  fetchShipSeries, createShipSeries, updateShipSeriesMembers, importShipSeriesVessels, completeSeriesPlaceholderVessel,
+  fetchShipSeries, createShipSeries, updateShipSeriesMembers, importShipSeriesVessels, completeSeriesPlaceholderVessel, confirmSeriesPlaceholderImo,
   renameShipSeries, fetchSeriesDocuments, uploadSeriesDocument, unlinkSeriesDocument,
   fetchRepresentativeApprovedDocuments, linkExistingSeriesDocument, linkAvailableRepresentativeDocuments, linkConfirmedSeriesStatement,
 } from "./backendService";
@@ -1197,6 +1197,7 @@ export default function App() {
   const [seriesBulkInput, setSeriesBulkInput] = useState('');
   const [seriesEditPlaceholderId, setSeriesEditPlaceholderId] = useState<number | null>(null);
   const [seriesEditImo, setSeriesEditImo] = useState('');
+  const [seriesImoConfirmation, setSeriesImoConfirmation] = useState(false);
   const [seriesEditFlag, setSeriesEditFlag] = useState('');
   const [seriesEditCapacity, setSeriesEditCapacity] = useState('');
   const [seriesEditYear, setSeriesEditYear] = useState('');
@@ -3491,7 +3492,7 @@ setPage("study");
                       <div className="flex flex-nowrap items-center gap-2 overflow-x-auto rounded border border-primary/20 bg-primary/5 px-3 py-3 min-h-12">
                         {selectedSisters.length === 0 && <p className="text-xs text-muted-foreground">No sister ships selected yet.</p>}
                         {selectedSisters.map(v => <div key={v.id} className="inline-flex shrink-0 items-center gap-2 rounded-full border border-primary/40 bg-background px-3 py-1.5 text-xs font-mono whitespace-nowrap">
-                          <span className="truncate" title={`${v.name} · ${v.imo}`}>{v.name}{v.isPlaceholder ? ' · Pending Details' : ''}</span>
+                          <span className="truncate" title={`${v.name} · ${v.imo}`}>{v.name}{v.isPlaceholder ? ' · Pending IMO confirmation' : ''}</span>
                           <button type="button" disabled={seriesBusy} aria-label={`Remove ${v.name} from series`} title="Remove from series" className="text-muted-foreground hover:text-destructive disabled:opacity-50" onClick={() => void runSeriesAction(() => updateShipSeriesMembers(series.id, series.members.filter(id => id !== v.id)), `${v.name} removed from series.`)}><X className="w-3 h-3" /></button>
                         </div>)}
                       </div>
@@ -3503,7 +3504,7 @@ setPage("study");
                       </div>
                       <div className="rounded border border-sky-500/20 bg-sky-500/5 p-3 space-y-2">
                         <p className="text-xs font-mono font-semibold text-sky-400">ADD MISSING SISTER SHIPS (BULK)</p>
-                        <p className="text-[11px] text-muted-foreground">One vessel per line: NAME, IMO (optional). Existing vessels are linked by IMO/name; missing vessels are created as Pending Details without a Study. Flag, capacity, year and IMO may be completed later. Review names carefully before saving.</p>
+                        <p className="text-[11px] text-muted-foreground">One vessel per line: NAME, IMO (optional). Existing vessels are linked by IMO/name; missing vessels are created as Pending Details without a Study. Confirm the IMO separately to activate a placeholder, or complete all vessel details as before. Review names carefully before saving.</p>
                         <textarea aria-label="Bulk sister ship names and optional IMO" rows={4} value={seriesBulkInput} onChange={e => setSeriesBulkInput(e.target.value)} placeholder={'AL DAFNA, 9443683\nSHAGRA, 9418365\nZARGA, 9431214\nRASHEEDA, 9443413'} className="w-full rounded border border-border bg-background p-2 text-xs font-mono" />
                         <button type="button" disabled={seriesBusy || !seriesBulkInput.trim()} onClick={() => void runSeriesAction(async () => {
                           const rows = seriesBulkInput.split(/\r?\n/).filter(line => line.trim()).map(line => {
@@ -3514,18 +3515,24 @@ setPage("study");
                           if (rows.length > 30) throw new Error('Maximum 30 vessels per operation.');
                           await importShipSeriesVessels(series.id, rows);
                           setSeriesBulkInput('');
-                        }, 'Sister ship list saved. Existing vessels reused; missing vessels registered as Pending Details.')} className="px-3 py-2 border border-sky-500/40 rounded text-sky-400 text-xs disabled:opacity-40"><Plus className="w-3.5 h-3.5 inline mr-1"/>Add / Link Listed Vessels</button>
+                        }, 'Sister ship list saved. Existing vessels reused; missing vessels await confirmation.')} className="px-3 py-2 border border-sky-500/40 rounded text-sky-400 text-xs disabled:opacity-40"><Plus className="w-3.5 h-3.5 inline mr-1"/>Add / Link Listed Vessels</button>
                       </div>
                       {selectedSisters.filter(v => v.isPlaceholder).length > 0 && (
                         <div className="space-y-2 rounded border border-amber-500/25 p-3">
                           <p className="font-mono text-xs font-semibold text-amber-400">PENDING VESSEL DETAILS</p>
                           {selectedSisters.filter(v => v.isPlaceholder).map(v => <div key={v.id} className="text-xs border border-border rounded p-2 space-y-2">
-                            <div className="flex justify-between gap-2 items-center"><span>{v.name} · {v.imo || 'IMO pending'}</span><button type="button" onClick={() => {setSeriesEditPlaceholderId(v.id);setSeriesEditImo(v.imo || '');setSeriesEditFlag(v.flag && v.flag !== '—' ? v.flag : '');setSeriesEditCapacity(v.capacity && v.capacity !== '—' ? v.capacity : '');setSeriesEditYear(v.year ? String(v.year) : '');}} className="text-sky-400 underline">Complete details</button></div>
+                            <div className="flex justify-between gap-2 items-center"><span>{v.name} · {v.imo || 'IMO pending'}</span><button type="button" onClick={() => {setSeriesEditPlaceholderId(v.id);setSeriesImoConfirmation(false);setSeriesEditImo(v.imo || '');setSeriesEditFlag(v.flag && v.flag !== '—' ? v.flag : '');setSeriesEditCapacity(v.capacity && v.capacity !== '—' ? v.capacity : '');setSeriesEditYear(v.year ? String(v.year) : '');}} className="text-sky-400 underline">Complete details</button></div>
                             {seriesEditPlaceholderId === v.id && <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                               <input placeholder="IMO (7 digits)" value={seriesEditImo} onChange={e => setSeriesEditImo(e.target.value)} className="bg-background border border-border rounded p-2" />
                               <input placeholder="Flag" value={seriesEditFlag} onChange={e => setSeriesEditFlag(e.target.value)} className="bg-background border border-border rounded p-2" />
                               <input placeholder="Capacity (e.g. 266,000 m³)" value={seriesEditCapacity} onChange={e => setSeriesEditCapacity(e.target.value)} className="bg-background border border-border rounded p-2" />
                               <input placeholder="Year built (YYYY)" value={seriesEditYear} onChange={e => setSeriesEditYear(e.target.value)} className="bg-background border border-border rounded p-2" />
+                              <div className="sm:col-span-2 rounded border border-sky-500/30 bg-sky-500/5 p-3 space-y-2">
+                                <p className="text-xs font-semibold text-sky-400">Confirm IMO Only</p>
+                                <p className="text-[11px] text-muted-foreground">Confirm the 7-digit IMO to activate this vessel without requiring Flag, Capacity or Year Built. Those fields remain unchanged and can be completed later. No Study is created or changed.</p>
+                                <label className="flex items-start gap-2 text-xs"><input type="checkbox" checked={seriesImoConfirmation} onChange={e => setSeriesImoConfirmation(e.target.checked)} /><span>I verified that this IMO belongs to {v.name}.</span></label>
+                                <button type="button" disabled={seriesBusy || !/^\d{7}$/.test(seriesEditImo.trim().replace(/^IMO\s*/i, '')) || !seriesImoConfirmation} onClick={() => askConfirmation('Confirm IMO Only', `Confirm IMO ${seriesEditImo.trim()} for ${v.name}? The vessel will become active without filling other details. This action will not change any Study.`, () => runSeriesAction(async () => { await confirmSeriesPlaceholderImo(v.id, seriesEditImo.trim()); setSeriesEditPlaceholderId(null); setSeriesImoConfirmation(false); }, `${v.name} IMO confirmed.`))} className="border border-sky-500/50 rounded px-3 py-2 text-sky-400 disabled:opacity-40">Confirm IMO Only</button>
+                              </div>
                               <button type="button" disabled={seriesBusy || !/^\d{7}$/.test(seriesEditImo.trim()) || !seriesEditFlag.trim() || !normalizeVesselCapacity(seriesEditCapacity) || !/^\d{4}$/.test(seriesEditYear)} onClick={() => void runSeriesAction(async () => { await completeSeriesPlaceholderVessel(v.id, {imo:seriesEditImo.trim(), flag:seriesEditFlag.trim(),capacity:normalizeVesselCapacity(seriesEditCapacity)!,yearBuilt:Number(seriesEditYear)}); setSeriesEditPlaceholderId(null); }, `${v.name} details completed.`)} className="border border-primary rounded px-3 py-2 text-primary disabled:opacity-40">Save vessel details</button>
                               <button type="button" onClick={() => setSeriesEditPlaceholderId(null)} className="border border-border rounded px-3 py-2">Cancel</button>
                             </div>}

@@ -871,6 +871,17 @@ export async function completeSeriesPlaceholderVessel(vesselId: number, details:
   if (error) throw error;
 }
 
+/** Admin confirms a placeholder by IMO alone; all other vessel fields and Studies remain untouched. */
+export async function confirmSeriesPlaceholderImo(vesselId: number, imo: string): Promise<void> {
+  const normalizedImo = imo.trim().replace(/^IMO\s*/i, "");
+  if (!/^\d{7}$/.test(normalizedImo)) throw new Error("IMO must contain exactly 7 digits.");
+  const { error } = await requireSupabase().rpc("admin_confirm_series_placeholder_imo", {
+    p_vessel_id: vesselId,
+    p_imo: normalizedImo,
+  });
+  if (error) throw error;
+}
+
 export async function renameShipSeries(seriesId: string, name: string, notes: string): Promise<void> {
   const { error } = await requireSupabase().from('ship_series')
     .update({ name: name.trim(), notes: notes.trim() }).eq('id', seriesId);
