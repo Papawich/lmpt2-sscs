@@ -2,6 +2,20 @@ import { requireSupabase, supabaseConfigured } from "./supabaseClient";
 
 export { supabaseConfigured };
 
+/** Consistent password policy for registration and recovery forms. */
+export function validatePasswordPolicy(password: string): string | null {
+  if (password.length < 8) return "Password must be at least 8 characters.";
+  if (!/[A-Z]/.test(password)) return "Password must include at least 1 uppercase letter (A-Z).";
+  if (!/[^A-Za-z0-9\s]/.test(password)) return "Password must include at least 1 special character (e.g. ! @ #).";
+  return null;
+}
+
+function assertPasswordPolicy(password: string): void {
+  const error = validatePasswordPolicy(password);
+  if (error) throw new Error(error);
+}
+
+
 export type CloudProfile = {
   id: string;
   name: string;
@@ -222,6 +236,7 @@ export async function signUp(opts: {
   company: string;
   role: "terminal_officer" | "ship_officer" | "viewer";
 }) {
+  assertPasswordPolicy(opts.password);
   const client = requireSupabase();
   const { data, error } = await client.auth.signUp({
     email: opts.email,
@@ -268,6 +283,7 @@ export async function verifyPasswordRecoveryLink(tokenHash: string) {
 }
 
 export async function updatePassword(password: string) {
+  assertPasswordPolicy(password);
   const client = requireSupabase();
   const { data, error } = await client.auth.updateUser({ password });
   if (error) throw error;
@@ -300,6 +316,7 @@ export async function checkPasswordResetStatus(requestId: string, resetToken: st
 }
 
 export async function completePasswordReset(requestId: string, resetToken: string, newPassword: string) {
+  assertPasswordPolicy(newPassword);
   const client = requireSupabase();
   const { data, error } = await client.functions.invoke("password-reset", {
     body: { action: "complete", requestId, resetToken, newPassword },
@@ -879,7 +896,12 @@ export async function confirmSeriesPlaceholderImo(vesselId: number, imo: string)
     p_vessel_id: vesselId,
     p_imo: normalizedImo,
   });
-  if (error) throw error;
+  if (error) {
+    if (error.code === "PGRST202" || error.code === "42883" || /could not find the function|does not exist/i.test(error.message ?? "")) {
+      throw new Error("Supabase SQL function admin_confirm_series_placeholder_imo is missing. Run 01_confirm_imo_only.sql in Supabase SQL Editor, then retry.");
+    }
+    throw error;
+  }
 }
 
 export async function renameShipSeries(seriesId: string, name: string, notes: string): Promise<void> {

@@ -36,6 +36,7 @@ import {
   requestPasswordResetNoEmail,
   checkPasswordResetStatus,
   completePasswordReset,
+  validatePasswordPolicy,
   fetchPasswordResetRequests,
   updatePasswordResetRequestStatus,
   fetchMyProfile,
@@ -60,7 +61,7 @@ import {
   getStudyDocumentUrl,
   fetchApprovalDocuments,
   deleteStudyDocument,
-  fetchShipSeries, createShipSeries, updateShipSeriesMembers, importShipSeriesVessels, completeSeriesPlaceholderVessel, confirmSeriesPlaceholderImo,
+  fetchShipSeries, createShipSeries, updateShipSeriesMembers, importShipSeriesVessels, confirmSeriesPlaceholderImo,
   renameShipSeries, fetchSeriesDocuments, uploadSeriesDocument, unlinkSeriesDocument,
   fetchRepresentativeApprovedDocuments, linkExistingSeriesDocument, linkAvailableRepresentativeDocuments, linkConfirmedSeriesStatement,
 } from "./backendService";
@@ -1197,10 +1198,6 @@ export default function App() {
   const [seriesBulkInput, setSeriesBulkInput] = useState('');
   const [seriesEditPlaceholderId, setSeriesEditPlaceholderId] = useState<number | null>(null);
   const [seriesEditImo, setSeriesEditImo] = useState('');
-  const [seriesImoConfirmation, setSeriesImoConfirmation] = useState(false);
-  const [seriesEditFlag, setSeriesEditFlag] = useState('');
-  const [seriesEditCapacity, setSeriesEditCapacity] = useState('');
-  const [seriesEditYear, setSeriesEditYear] = useState('');
   const [representativeDocs, setRepresentativeDocs] = useState<RepresentativeDocument[]>([]);
   const [selectedReferenceDocId, setSelectedReferenceDocId] = useState('');
   const [referenceDocsLoading, setReferenceDocsLoading] = useState(false);
@@ -1382,7 +1379,12 @@ export default function App() {
     if (!currentUser?.isAdmin || seriesBusy) return;
     setSeriesBusy(true); setSeriesError('');
     try { await action(); await refreshSeries(); showToast(success); }
-    catch (err) { setSeriesError(err instanceof Error ? err.message : 'Series action failed'); }
+    catch (err) {
+      console.error('[Ship Series action failed]', err);
+      const detail = err && typeof err === 'object' ? err as { message?: string; details?: string; hint?: string; code?: string } : null;
+      const message = [detail?.message, detail?.details, detail?.hint, detail?.code ? `Code: ${detail.code}` : ''].filter(Boolean).join(' | ');
+      setSeriesError(message || (err instanceof Error ? err.message : 'Series action failed'));
+    }
     finally { setSeriesBusy(false); }
   }
   function seriesForVessel(vesselId: number) {
@@ -1737,7 +1739,8 @@ export default function App() {
     if (!regCompany.trim())       return setRegErr("Company name is required.");
     if (!regEmail.includes("@"))  return setRegErr("Enter a valid email address.");
     if (!supabaseConfigured && users.find(u => u.email === regEmail)) return setRegErr("An account with this email already exists.");
-    if (regPw.length < 8)         return setRegErr("Password must be at least 8 characters.");
+    const passwordError = validatePasswordPolicy(regPw);
+    if (passwordError) return setRegErr(passwordError);
     if (regPw !== regConfirm)     return setRegErr("Passwords do not match.");
     setOtpSending(true);
     const otp = generateOtp();
@@ -1911,8 +1914,9 @@ export default function App() {
   async function handleSetNewPassword(e: React.FormEvent) {
     e.preventDefault();
     setForgotErr("");
-    if (forgotNewPw.length < 8) {
-      setForgotErr("Password must be at least 8 characters.");
+    const passwordError = validatePasswordPolicy(forgotNewPw);
+    if (passwordError) {
+      setForgotErr(passwordError);
       return;
     }
     if (forgotNewPw !== forgotConfirmPw) {
@@ -3271,8 +3275,9 @@ setPage("study");
                   ))}
                 </div>
               </div>
-              <Field label="Password" value={regPw} onChange={setRegPw} type={showRegPw ? "text" : "password"} placeholder="Min. 8 characters" icon={Lock}
+              <Field label="Password" value={regPw} onChange={setRegPw} type={showRegPw ? "text" : "password"} placeholder="8+ chars, uppercase & symbol" icon={Lock}
                 trailing={<button type="button" onClick={() => setShowRegPw(!showRegPw)} className="text-muted-foreground hover:text-foreground transition-colors">{showRegPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}</button>} />
+              <p className="text-xs text-muted-foreground">At least 8 characters, including 1 uppercase letter and 1 special character (e.g. ! @ #).</p>
               <Field label="Confirm Password" value={regConfirm} onChange={setRegConfirm} type="password" placeholder="Repeat password" icon={Lock} />
               <button type="submit" disabled={otpSending}
                 className="w-full bg-primary text-primary-foreground font-mono font-semibold text-sm tracking-widest uppercase py-2.5 rounded hover:bg-primary/90 active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-60">
@@ -3368,8 +3373,9 @@ setPage("study");
             <div className="mb-8"><h2 className="font-mono text-xl font-bold text-foreground tracking-wide mb-1">SET NEW PASSWORD</h2><p className="text-sm text-muted-foreground">Your reset request was approved. Choose a new password for <span className="font-mono text-foreground">{forgotEmail}</span>.</p></div>
             <form onSubmit={handleSetNewPassword} className="space-y-4">
               {forgotErr && <div className="flex items-start gap-2.5 p-3 rounded bg-destructive/10 border border-destructive/30 text-destructive text-sm"><AlertCircle className="w-4 h-4 mt-0.5 shrink-0" /><span>{forgotErr}</span></div>}
-              <Field label="New Password" value={forgotNewPw} onChange={setForgotNewPw} type={showForgotPw ? "text" : "password"} placeholder="Minimum 8 characters" icon={Lock}
+              <Field label="New Password" value={forgotNewPw} onChange={setForgotNewPw} type={showForgotPw ? "text" : "password"} placeholder="8+ chars, uppercase & symbol" icon={Lock}
                 trailing={<button type="button" onClick={() => setShowForgotPw(v => !v)} className="text-muted-foreground hover:text-foreground transition-colors">{showForgotPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}</button>} />
+              <p className="text-xs text-muted-foreground">At least 8 characters, including 1 uppercase letter and 1 special character (e.g. ! @ #).</p>
               <Field label="Confirm New Password" value={forgotConfirmPw} onChange={setForgotConfirmPw} type={showForgotPw ? "text" : "password"} placeholder="Repeat new password" icon={Lock} />
               <button type="submit" disabled={forgotLoading} className="w-full bg-primary text-primary-foreground font-mono font-semibold text-sm tracking-widest uppercase py-2.5 rounded hover:bg-primary/90 transition-all flex items-center justify-center gap-2 disabled:opacity-60">
                 {forgotLoading ? <><RefreshCw className="w-4 h-4 animate-spin" />Updating…</> : <>Update Password<CheckCircle2 className="w-4 h-4" /></>}
@@ -3504,7 +3510,7 @@ setPage("study");
                       </div>
                       <div className="rounded border border-sky-500/20 bg-sky-500/5 p-3 space-y-2">
                         <p className="text-xs font-mono font-semibold text-sky-400">ADD MISSING SISTER SHIPS (BULK)</p>
-                        <p className="text-[11px] text-muted-foreground">One vessel per line: NAME, IMO (optional). Existing vessels are linked by IMO/name; missing vessels are created as Pending Details without a Study. Confirm the IMO separately to activate a placeholder, or complete all vessel details as before. Review names carefully before saving.</p>
+                        <p className="text-[11px] text-muted-foreground">One vessel per line: NAME, IMO (optional). Existing vessels are linked by IMO/name; missing vessels are created as Pending Details without a Study. Save the 7-digit IMO to activate a placeholder without entering other vessel details. Review names carefully before saving.</p>
                         <textarea aria-label="Bulk sister ship names and optional IMO" rows={4} value={seriesBulkInput} onChange={e => setSeriesBulkInput(e.target.value)} placeholder={'AL DAFNA, 9443683\nSHAGRA, 9418365\nZARGA, 9431214\nRASHEEDA, 9443413'} className="w-full rounded border border-border bg-background p-2 text-xs font-mono" />
                         <button type="button" disabled={seriesBusy || !seriesBulkInput.trim()} onClick={() => void runSeriesAction(async () => {
                           const rows = seriesBulkInput.split(/\r?\n/).filter(line => line.trim()).map(line => {
@@ -3521,21 +3527,24 @@ setPage("study");
                         <div className="space-y-2 rounded border border-amber-500/25 p-3">
                           <p className="font-mono text-xs font-semibold text-amber-400">PENDING VESSEL DETAILS</p>
                           {selectedSisters.filter(v => v.isPlaceholder).map(v => <div key={v.id} className="text-xs border border-border rounded p-2 space-y-2">
-                            <div className="flex justify-between gap-2 items-center"><span>{v.name} · {v.imo || 'IMO pending'}</span><button type="button" onClick={() => {setSeriesEditPlaceholderId(v.id);setSeriesImoConfirmation(false);setSeriesEditImo(v.imo || '');setSeriesEditFlag(v.flag && v.flag !== '—' ? v.flag : '');setSeriesEditCapacity(v.capacity && v.capacity !== '—' ? v.capacity : '');setSeriesEditYear(v.year ? String(v.year) : '');}} className="text-sky-400 underline">Complete details</button></div>
-                            {seriesEditPlaceholderId === v.id && <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                              <input placeholder="IMO (7 digits)" value={seriesEditImo} onChange={e => setSeriesEditImo(e.target.value)} className="bg-background border border-border rounded p-2" />
-                              <input placeholder="Flag" value={seriesEditFlag} onChange={e => setSeriesEditFlag(e.target.value)} className="bg-background border border-border rounded p-2" />
-                              <input placeholder="Capacity (e.g. 266,000 m³)" value={seriesEditCapacity} onChange={e => setSeriesEditCapacity(e.target.value)} className="bg-background border border-border rounded p-2" />
-                              <input placeholder="Year built (YYYY)" value={seriesEditYear} onChange={e => setSeriesEditYear(e.target.value)} className="bg-background border border-border rounded p-2" />
-                              <div className="sm:col-span-2 rounded border border-sky-500/30 bg-sky-500/5 p-3 space-y-2">
-                                <p className="text-xs font-semibold text-sky-400">Confirm IMO Only</p>
-                                <p className="text-[11px] text-muted-foreground">Confirm the 7-digit IMO to activate this vessel without requiring Flag, Capacity or Year Built. Those fields remain unchanged and can be completed later. No Study is created or changed.</p>
-                                <label className="flex items-start gap-2 text-xs"><input type="checkbox" checked={seriesImoConfirmation} onChange={e => setSeriesImoConfirmation(e.target.checked)} /><span>I verified that this IMO belongs to {v.name}.</span></label>
-                                <button type="button" disabled={seriesBusy || !/^\d{7}$/.test(seriesEditImo.trim().replace(/^IMO\s*/i, '')) || !seriesImoConfirmation} onClick={() => askConfirmation('Confirm IMO Only', `Confirm IMO ${seriesEditImo.trim()} for ${v.name}? The vessel will become active without filling other details. This action will not change any Study.`, () => runSeriesAction(async () => { await confirmSeriesPlaceholderImo(v.id, seriesEditImo.trim()); setSeriesEditPlaceholderId(null); setSeriesImoConfirmation(false); }, `${v.name} IMO confirmed.`))} className="border border-sky-500/50 rounded px-3 py-2 text-sky-400 disabled:opacity-40">Confirm IMO Only</button>
+                            <div className="flex justify-between gap-2 items-center">
+                              <span>{v.name} · {v.imo || 'IMO pending'}</span>
+                              <button type="button" onClick={() => { setSeriesEditPlaceholderId(v.id); setSeriesEditImo(v.imo || ''); setSeriesError(''); }} className="text-sky-400 underline">Set IMO</button>
+                            </div>
+                            {seriesEditPlaceholderId === v.id && (
+                              <div className="space-y-2">
+                                <label className="block text-[11px] text-muted-foreground" htmlFor={`series-imo-${v.id}`}>IMO Number (7 digits)</label>
+                                <input id={`series-imo-${v.id}`} inputMode="numeric" placeholder="IMO (7 digits)" value={seriesEditImo} onChange={e => setSeriesEditImo(e.target.value)} className="w-full bg-background border border-border rounded p-2" />
+                                <p className="text-[11px] text-muted-foreground">Saves the IMO number and completes the pending vessel record. Other vessel fields and all Studies remain unchanged.</p>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <button type="button" disabled={seriesBusy || !/^\d{7}$/.test(seriesEditImo.trim().replace(/^IMO\s*/i, ''))} onClick={() => void runSeriesAction(async () => {
+                                    await confirmSeriesPlaceholderImo(v.id, seriesEditImo);
+                                    setSeriesEditPlaceholderId(null);
+                                  }, `${v.name} IMO saved.`)} className="border border-sky-500/50 rounded px-3 py-2 text-sky-400 disabled:opacity-40">{seriesBusy ? 'Saving…' : 'Save IMO'}</button>
+                                  <button type="button" disabled={seriesBusy} onClick={() => {setSeriesEditPlaceholderId(null);setSeriesError('');}} className="border border-border rounded px-3 py-2">Cancel</button>
+                                </div>
                               </div>
-                              <button type="button" disabled={seriesBusy || !/^\d{7}$/.test(seriesEditImo.trim()) || !seriesEditFlag.trim() || !normalizeVesselCapacity(seriesEditCapacity) || !/^\d{4}$/.test(seriesEditYear)} onClick={() => void runSeriesAction(async () => { await completeSeriesPlaceholderVessel(v.id, {imo:seriesEditImo.trim(), flag:seriesEditFlag.trim(),capacity:normalizeVesselCapacity(seriesEditCapacity)!,yearBuilt:Number(seriesEditYear)}); setSeriesEditPlaceholderId(null); }, `${v.name} details completed.`)} className="border border-primary rounded px-3 py-2 text-primary disabled:opacity-40">Save vessel details</button>
-                              <button type="button" onClick={() => setSeriesEditPlaceholderId(null)} className="border border-border rounded px-3 py-2">Cancel</button>
-                            </div>}
+                            )}
                           </div>)}
                         </div>
                       )}
